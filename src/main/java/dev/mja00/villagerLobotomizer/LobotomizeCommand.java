@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
+import dev.mja00.villagerLobotomizer.policy.RestockSchedule;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
@@ -181,6 +182,16 @@ public class LobotomizeCommand {
                 .append(Component.text(villager.getVillagerLevel()).color(NamedTextColor.GREEN));
         message = message.append(Component.text("\nVillager experience: "))
                 .append(Component.text(villager.getVillagerExperience()).color(NamedTextColor.GREEN));
+
+        if (this.plugin.getStorage().isScheduleModeActive()) {
+            RestockSchedule schedule = this.plugin.getStorage().getRestockSchedule();
+            long fullTime = villager.getWorld().getFullTime();
+            long nextOccurrence = schedule.nextOccurrence(fullTime);
+            String nextTime = RestockSchedule.formatTick(nextOccurrence % RestockSchedule.TICKS_PER_DAY);
+            message = message.append(Component.text("\nNext scheduled restock: "))
+                    .append(Component.text(nextTime + " (" + villager.getWorld().getName() + ")").color(NamedTextColor.GREEN));
+        }
+
         source.getSender().sendMessage(message);
 
         return Command.SINGLE_SUCCESS;

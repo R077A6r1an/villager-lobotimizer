@@ -224,6 +224,16 @@ public class LobotomizeStorage {
         return this.activeVillagers;
     }
 
+    /** @return {@code true} if {@code restock-schedule.mode: schedule} is configured and active. */
+    public boolean isScheduleModeActive() {
+        return this.scheduleModeActive;
+    }
+
+    /** @return the parsed restock schedule; only meaningful when {@link #isScheduleModeActive()}. */
+    public @NotNull RestockSchedule getRestockSchedule() {
+        return this.restockSchedule;
+    }
+
     // Order is remove-then-add so the brief intermediate state is "in neither set"
     // rather than "in both" — readers seeing a momentary gap simply skip a tick.
     private void setActive(@NotNull Villager v) {
