@@ -37,6 +37,7 @@ import org.jetbrains.annotations.NotNull;
 import dev.mja00.villagerLobotomizer.policy.BlockClassifier;
 import dev.mja00.villagerLobotomizer.policy.BlockGrid;
 import dev.mja00.villagerLobotomizer.policy.BlockSnapshot;
+import dev.mja00.villagerLobotomizer.policy.RestockSchedule;
 import dev.mja00.villagerLobotomizer.policy.VillagerActivityPolicy;
 import dev.mja00.villagerLobotomizer.policy.VillagerState;
 import dev.mja00.villagerLobotomizer.utils.SentryTaskWrapper;
@@ -53,6 +54,7 @@ public class LobotomizeStorage {
     private final NamespacedKey key;
     private final NamespacedKey lobotomizedKey;
     private final NamespacedKey lastRestockCheckDayTimeKey;
+    private final NamespacedKey lastRestockPassIdKey;
     private final Set<Villager> activeVillagers = Collections.newSetFromMap(new ConcurrentHashMap<>(128));
     private final Set<Villager> inactiveVillagers = Collections.newSetFromMap(new ConcurrentHashMap<>(128));
     private final Map<Chunk, Long> changedChunks = new ConcurrentHashMap<>();
@@ -63,6 +65,10 @@ public class LobotomizeStorage {
     private final long inactiveCheckInterval;
     private final long restockInterval;
     private final long restockRandomRange;
+    // "schedule" mode is active only when configured AND at least one time parsed successfully;
+    // an empty/misconfigured schedule falls back to interval-mode behavior rather than never restocking.
+    private final boolean scheduleModeActive;
+    private final RestockSchedule restockSchedule;
     private final boolean onlyProfessions;
     private final boolean onlyWithExperience;
     private final boolean lobotomizePassengers;
@@ -98,6 +104,19 @@ public class LobotomizeStorage {
         this.inactiveCheckInterval = validateInterval("inactive-check-interval", plugin.getConfig().getLong("inactive-check-interval", this.checkInterval), 1L, 150L);
         this.restockInterval = validateInterval("restock-interval", plugin.getConfig().getLong("restock-interval"), 0L, 540000L);
         this.restockRandomRange = validateInterval("restock-random-range", plugin.getConfig().getLong("restock-random-range"), 0L, 0L);
+
+        boolean scheduleModeConfigured = "schedule".equalsIgnoreCase(plugin.getConfig().getString("restock-schedule.mode", "interval"));
+        this.restockSchedule = RestockSchedule.parse(plugin.getConfig().getStringList("restock-schedule.times"));
+        if (scheduleModeConfigured) {
+            for (String warning : this.restockSchedule.warnings()) {
+                this.logger.warning("[restock-schedule] " + warning);
+            }
+            if (this.restockSchedule.isEmpty()) {
+                this.logger.warning("restock-schedule.mode is \"schedule\" but no valid restock-schedule.times "
+                        + "entries were configured; falling back to interval-mode restocking.");
+            }
+        }
+        this.scheduleModeActive = scheduleModeConfigured && !this.restockSchedule.isEmpty();
         this.onlyProfessions = plugin.getConfig().getBoolean("only-lobotomize-villagers-with-professions");
         this.onlyWithExperience = plugin.getConfig().getBoolean("only-lobotomize-villagers-with-experience");
         this.lobotomizePassengers = plugin.getConfig().getBoolean("always-lobotomize-villagers-in-vehicles");
@@ -179,6 +198,7 @@ public class LobotomizeStorage {
         this.key = new NamespacedKey(plugin, "lastRestock");
         this.lobotomizedKey = new NamespacedKey(plugin, "isLobotomized");
         this.lastRestockCheckDayTimeKey = new NamespacedKey(plugin, "lastRestockCheckDayTime");
+        this.lastRestockPassIdKey = new NamespacedKey(plugin, "lastRestockPassId");
         // Use Paper's GlobalRegionScheduler for chunk processing. It never touches entities directly;
         // per-chunk entity access is dispatched to the owning region via getRegionScheduler() (see
         // scheduleChunkVillagerProcessing), keeping this Folia thread-ownership safe.
@@ -660,6 +680,9 @@ public class LobotomizeStorage {
      * @return {@code true} if the villager should restock, {@code false} otherwise
      */
     private boolean shouldRestock(@NotNull Villager villager) {
+        if (this.scheduleModeActive) {
+            return VillagerUtils.shouldRestock(villager, this.lastRestockCheckDayTimeKey, this.restockSchedule.size());
+        }
         return VillagerUtils.shouldRestock(villager, this.lastRestockCheckDayTimeKey);
     }
 
@@ -672,26 +695,45 @@ public class LobotomizeStorage {
      */
     private void refreshTrades(@NotNull Villager villager) {
         PersistentDataContainer pdc = villager.getPersistentDataContainer();
-        long lastRestock = pdc.getOrDefault(this.key, PersistentDataType.LONG, 0L);
 
-        long now = System.currentTimeMillis();
-        long timeSinceLastRestock = now - lastRestock;
-        // Bound the random offset by restockInterval so effectiveInterval can't go negative when
-        // restock-random-range is misconfigured larger than restock-interval, which would make
-        // intervalPassed always true until the daily restock cap is hit.
-        long randomBound = Math.min(this.restockRandomRange, this.restockInterval);
-        long randomOffset = randomBound > 0 ? this.random.nextLong(randomBound) : 0L;
-        long effectiveInterval = this.restockInterval - randomOffset;
-        boolean intervalPassed = timeSinceLastRestock > effectiveInterval;
+        // In schedule mode, "opportunity" is a monotonic per-world pass counter (RestockSchedule)
+        // instead of a wall-clock interval; comparing it to the villager's last-consumed value
+        // naturally catches up after sleep/`/time set` jumps, since every point crossed between the
+        // last check and now is counted, not just whichever point the check happens to land on.
+        boolean scheduleMode = this.scheduleModeActive;
+        long currentPassId = 0L;
+        long lastRestockPassId = 0L;
+        long now = 0L;
+        long lastRestock = 0L;
+        long timeSinceLastRestock = 0L;
+        long effectiveInterval = 0L;
+        boolean restockOpportunityAvailable;
+
+        if (scheduleMode) {
+            currentPassId = this.restockSchedule.passId(villager.getWorld().getFullTime());
+            lastRestockPassId = pdc.getOrDefault(this.lastRestockPassIdKey, PersistentDataType.LONG, 0L);
+            restockOpportunityAvailable = currentPassId > lastRestockPassId;
+        } else {
+            lastRestock = pdc.getOrDefault(this.key, PersistentDataType.LONG, 0L);
+            now = System.currentTimeMillis();
+            timeSinceLastRestock = now - lastRestock;
+            // Bound the random offset by restockInterval so effectiveInterval can't go negative when
+            // restock-random-range is misconfigured larger than restock-interval, which would make
+            // restockOpportunityAvailable always true until the daily restock cap is hit.
+            long randomBound = Math.min(this.restockRandomRange, this.restockInterval);
+            long randomOffset = randomBound > 0 ? this.random.nextLong(randomBound) : 0L;
+            effectiveInterval = this.restockInterval - randomOffset;
+            restockOpportunityAvailable = timeSinceLastRestock > effectiveInterval;
+        }
 
         int currentLevel = villager.getVillagerLevel();
         int expectedLevel = VillagerUtils.getVillagerLevel(villager);
         boolean needsLevelUp = currentLevel < expectedLevel;
 
         // Cheap gate first: if neither a restock nor a level-up could happen this tick, skip the
-        // daytime check and the 27-block job-site scan entirely. restock-interval is much larger
-        // than check-interval, so the interval gate is false on most checks for most villagers.
-        if (!intervalPassed && !needsLevelUp) {
+        // daytime check and the 27-block job-site scan entirely. A restock opportunity is rare
+        // relative to how often this check runs, so this gate is false on most checks for most villagers.
+        if (!restockOpportunityAvailable && !needsLevelUp) {
             return;
         }
 
@@ -711,13 +753,22 @@ public class LobotomizeStorage {
         }
 
         if (this.plugin.isDebugging()) {
-            this.logger.info("[Debug] Trade refresh check for " + villager.getUniqueId() +
-                    ": timeSinceLastRestock=" + timeSinceLastRestock + "ms, effectiveInterval=" + effectiveInterval + "ms, restocksToday=" + villager.getRestocksToday());
+            if (scheduleMode) {
+                this.logger.info("[Debug] Trade refresh check for " + villager.getUniqueId() +
+                        ": currentPassId=" + currentPassId + ", lastRestockPassId=" + lastRestockPassId + ", restocksToday=" + villager.getRestocksToday());
+            } else {
+                this.logger.info("[Debug] Trade refresh check for " + villager.getUniqueId() +
+                        ": timeSinceLastRestock=" + timeSinceLastRestock + "ms, effectiveInterval=" + effectiveInterval + "ms, restocksToday=" + villager.getRestocksToday());
+            }
         }
 
-        if (intervalPassed && shouldRestock(villager)) {
-            lastRestock = now;
-            pdc.set(this.key, PersistentDataType.LONG, lastRestock);
+        if (restockOpportunityAvailable && shouldRestock(villager)) {
+            if (scheduleMode) {
+                pdc.set(this.lastRestockPassIdKey, PersistentDataType.LONG, currentPassId);
+            } else {
+                lastRestock = now;
+                pdc.set(this.key, PersistentDataType.LONG, lastRestock);
+            }
             List<MerchantRecipe> recipes = new ArrayList<>(villager.getRecipes());
 
             for (MerchantRecipe recipe : recipes) {
@@ -728,7 +779,7 @@ public class LobotomizeStorage {
             villager.setRestocksToday(villager.getRestocksToday() + 1);
             // Tell the villager to update pricing of their trades
             villager.updateDemand();
-            
+
             if (this.plugin.isDebugging()) {
                 this.logger.info("[Debug] Villager " + villager.getUniqueId() + " restocked! restocksToday now: " + villager.getRestocksToday());
             }
@@ -741,9 +792,16 @@ public class LobotomizeStorage {
                         1.0F);
             }
         } else if (this.plugin.isDebugging()) {
-            this.logger.info("[Debug] Trade refresh NOT performed for " + villager.getUniqueId() +
-                    ": intervalPassed=" + intervalPassed + " (needed " + effectiveInterval + "ms, had " + timeSinceLastRestock + "ms)" +
-                    (intervalPassed ? ", shouldRestock=false" : ""));
+            if (scheduleMode) {
+                this.logger.info("[Debug] Trade refresh NOT performed for " + villager.getUniqueId() +
+                        ": restockOpportunityAvailable=" + restockOpportunityAvailable +
+                        " (currentPassId=" + currentPassId + ", lastRestockPassId=" + lastRestockPassId + ")" +
+                        (restockOpportunityAvailable ? ", shouldRestock=false" : ""));
+            } else {
+                this.logger.info("[Debug] Trade refresh NOT performed for " + villager.getUniqueId() +
+                        ": intervalPassed=" + restockOpportunityAvailable + " (needed " + effectiveInterval + "ms, had " + timeSinceLastRestock + "ms)" +
+                        (restockOpportunityAvailable ? ", shouldRestock=false" : ""));
+            }
         }
 
         // Level the villager up to match its accumulated experience. Gated on day + job site above

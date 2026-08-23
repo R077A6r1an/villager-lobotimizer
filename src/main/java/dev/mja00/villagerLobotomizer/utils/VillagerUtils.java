@@ -166,18 +166,33 @@ public class VillagerUtils {
         }
     }
 
+    /** The daily restock cap used in interval mode, a real-time approximation of vanilla behavior. */
+    private static final int DEFAULT_MAX_RESTOCKS_PER_DAY = 2;
+
     /**
-     * Determines if a villager is allowed to restock.
+     * Determines if a villager is allowed to restock, under the interval-mode daily cap.
      *
      * @return true if the villager has fewer than 2 restocks today, false otherwise
      */
     public static boolean allowedToRestock(Villager villager) {
-        int numberOfRestocksToday = villager.getRestocksToday();
-        return numberOfRestocksToday < 2;
+        return allowedToRestock(villager, DEFAULT_MAX_RESTOCKS_PER_DAY);
     }
 
     /**
-     * Determines whether a villager should restock, resetting the daily counter when a new day begins.
+     * Determines if a villager is allowed to restock, under an explicit daily cap. Schedule mode
+     * passes {@code restock-schedule.times.size()} here instead of the hardcoded interval-mode cap,
+     * since each configured schedule point is one restock opportunity per day.
+     *
+     * @param maxRestocksPerDay the maximum number of restocks allowed today
+     * @return true if the villager has restocked fewer than {@code maxRestocksPerDay} times today
+     */
+    public static boolean allowedToRestock(Villager villager, int maxRestocksPerDay) {
+        return villager.getRestocksToday() < maxRestocksPerDay;
+    }
+
+    /**
+     * Determines whether a villager should restock, resetting the daily counter when a new day begins,
+     * under the interval-mode daily cap.
      *
      * @param villager the villager to check
      * @param lastRestockCheckDayTimeKey the persistent data key for tracking the last full-time check
@@ -185,6 +200,20 @@ public class VillagerUtils {
      *         {@code false} otherwise
      */
     public static boolean shouldRestock(Villager villager, NamespacedKey lastRestockCheckDayTimeKey) {
+        return shouldRestock(villager, lastRestockCheckDayTimeKey, DEFAULT_MAX_RESTOCKS_PER_DAY);
+    }
+
+    /**
+     * Determines whether a villager should restock, resetting the daily counter when a new day begins,
+     * under an explicit daily cap (see {@link #allowedToRestock(Villager, int)}).
+     *
+     * @param villager the villager to check
+     * @param lastRestockCheckDayTimeKey the persistent data key for tracking the last full-time check
+     * @param maxRestocksPerDay the maximum number of restocks allowed today
+     * @return {@code true} if the villager is allowed to restock today and has recipes requiring restocking,
+     *         {@code false} otherwise
+     */
+    public static boolean shouldRestock(Villager villager, NamespacedKey lastRestockCheckDayTimeKey, int maxRestocksPerDay) {
         PersistentDataContainer pdc = villager.getPersistentDataContainer();
         long lastRestockCheckDayTime = pdc.getOrDefault(lastRestockCheckDayTimeKey, org.bukkit.persistence.PersistentDataType.LONG, 0L);
         long fullTime = villager.getWorld().getFullTime();
@@ -200,6 +229,6 @@ public class VillagerUtils {
 
         pdc.set(lastRestockCheckDayTimeKey, org.bukkit.persistence.PersistentDataType.LONG, fullTime);
 
-        return allowedToRestock(villager) && needsToRestock(villager);
+        return allowedToRestock(villager, maxRestocksPerDay) && needsToRestock(villager);
     }
 }

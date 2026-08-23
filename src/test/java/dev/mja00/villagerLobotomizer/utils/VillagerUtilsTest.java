@@ -105,4 +105,44 @@ class VillagerUtilsTest extends MockBukkitTestBase {
         assertEquals(24_050L, villager.getPersistentDataContainer()
                 .getOrDefault(LAST_RESTOCK_KEY, PersistentDataType.LONG, 0L), "PDC updated to current full time");
     }
+
+    @Test
+    void allowedToRestockRespectsExplicitDailyCap() {
+        Villager villager = spawnVillager();
+
+        villager.setRestocksToday(2);
+        assertFalse(VillagerUtils.allowedToRestock(villager, 2), "2-arg cap of 2 blocks a 3rd restock");
+        assertTrue(VillagerUtils.allowedToRestock(villager, 3), "a schedule with 3 points allows a 3rd restock");
+
+        villager.setRestocksToday(3);
+        assertFalse(VillagerUtils.allowedToRestock(villager, 3));
+    }
+
+    @Test
+    void shouldRestockWithExplicitCapResetsDailyCounterOnNewDay() {
+        Villager villager = spawnVillager();
+        WorldMock world = (WorldMock) villager.getWorld();
+
+        villager.getPersistentDataContainer().set(LAST_RESTOCK_KEY, PersistentDataType.LONG, 100L);
+        villager.setRestocksToday(3);
+
+        world.setFullTime(24_000L + 50L);
+        VillagerUtils.shouldRestock(villager, LAST_RESTOCK_KEY, 3);
+
+        assertEquals(0, villager.getRestocksToday(), "crossing a day boundary resets the counter regardless of cap");
+    }
+
+    @Test
+    void shouldRestockWithExplicitCapAllowsMoreThanTwoPerDay() {
+        Villager villager = spawnVillager();
+        MerchantRecipe used = new MerchantRecipe(new ItemStack(Material.EMERALD), 16);
+        used.setUses(1);
+        villager.setRecipes(List.of(used));
+
+        villager.setRestocksToday(2);
+        assertFalse(VillagerUtils.shouldRestock(villager, LAST_RESTOCK_KEY, 2),
+                "the interval-mode cap of 2 would block this");
+        assertTrue(VillagerUtils.shouldRestock(villager, LAST_RESTOCK_KEY, 3),
+                "a 3-point schedule allows a 3rd restock");
+    }
 }
