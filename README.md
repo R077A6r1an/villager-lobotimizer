@@ -13,7 +13,7 @@ A Minecraft Paper plugin that improves server performance by turning off village
 - Automatically detects when villagers are trapped in trading halls
 - Disables AI for trapped villagers to improve server performance
 - Maintains villager trading functionality while AI is disabled
-- Automatically refreshes villager trades on a configurable schedule with randomization support
+- Automatically refreshes villager trades on either a real-time interval (with randomization support) or a fixed in-game daily clock schedule
 - Profession-specific restock sounds and level-up celebrations
 - Optimized job site detection for better performance
 - Night-time trade refresh functionality
@@ -51,6 +51,19 @@ restock-interval: 540000
 
 #Range (in milliseconds) before restock-interval to start random restock checks. If set to 0, restocking is not randomized. If equal to or greater than restock-interval, restock will always occur.
 restock-random-range: 0
+
+#Restock scheduling mode. "interval" = legacy real-time timer (restock-interval/restock-random-range above).
+#"schedule" = fixed in-game daily clock times (restock-schedule.times below), independent of real-world elapsed time.
+restock-schedule:
+  mode: "interval"
+
+  #List of in-game times at which a restock pass runs, in 24h HH:mm format, evaluated against each
+  #world's own day/night cycle. Only used when mode is "schedule". Only daytime values are valid
+  #(06:00-18:00 inclusive); night-time entries are rejected with a warning on load.
+  times:
+    - "08:00"
+    - "10:30"
+    - "13:00"
 
 #Whether to only lobotomize villagers with jobs
 only-lobotomize-villagers-with-professions: false
@@ -106,6 +119,24 @@ persist-lobotomized-state: true
 #Enable Sentry error tracking to help developers identify and fix bugs. See "Privacy & Telemetry" section below for details.
 enable-sentry: true
 ```
+
+## Restock Scheduling
+
+Villager trades can be refreshed in one of two modes, set via `restock-schedule.mode`:
+
+- **`interval`** (default): the legacy real-time timer. Trades refresh roughly every
+  `restock-interval` milliseconds (optionally randomized by `restock-random-range`), independent
+  of in-game time.
+- **`schedule`**: trades refresh at fixed in-game clock times listed in `restock-schedule.times`
+  (24h `HH:mm`, daytime only — 06:00 through 18:00), evaluated against each world's own day/night
+  cycle rather than real-world elapsed time. A villager can restock once per configured time per
+  day (e.g. three configured times allow up to three restocks/day). Restocks that would have fired
+  while a schedule window was skipped over — by sleeping through the night or an admin `/time set`
+  jump — fire on the next check rather than being silently dropped. Configured times fire exactly,
+  with no randomization. If `mode: schedule` is set but no valid times are configured, the plugin
+  falls back to `interval` behavior and logs a warning.
+
+`/lobotomy debug` shows the next scheduled restock time when `schedule` mode is active.
 
 ## Special Villager Names
 

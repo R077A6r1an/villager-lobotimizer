@@ -23,26 +23,28 @@ Note: The project is misspelled on purpose. You'll need to use VillagerLobotomiz
 - Sets: `activeVillagers`, `inactiveVillagers`
 - Maps: `villagerTasks` (UUID→Task), `changedChunks`, `villagerTaskIntervals`
 - Lobotomy decision delegated to `policy.VillagerActivityPolicy` (name overrides "nobrain"/exempt, water/vehicle/profession checks, movement check, optional roof check); `LobotomizeStorage` adapts a live `Villager`/`World` into `VillagerState`/`BlockGrid` per check (`villagerStateOf`, `gridOf`)
-- Trade refresh: PDC-tracked restock timing, daytime-only, job site proximity, profession sounds, level-up effects
+- Trade refresh: PDC-tracked restock timing, daytime-only, job site proximity, profession sounds, level-up effects. Two restock-gating modes, chosen by `restock-schedule.mode`: legacy real-time `interval` (wall-clock, `restock-interval`/`restock-random-range`), or `schedule` (fixed in-game daily clock times via `policy.RestockSchedule`, computed inline in `refreshTrades` from the villager's own `World.getFullTime()` — deliberately not a separate cross-region tracker task, to avoid reading region-owned world-time state off its owning thread). `isScheduleModeActive()`/`getRestockSchedule()` expose the parsed schedule to `LobotomizeCommand`.
 
 **policy/** - Pure, unit-tested lobotomy decision logic (no Bukkit live objects, scheduler, or shared sets):
 - `VillagerActivityPolicy.shouldBeActive(VillagerState, BlockGrid)` - decision rules + `canMoveCardinally`/`canMoveThrough`/`testImpassable`
 - `BlockClassifier` - Material sets (`impassableRegular`, `impassableTall`, `impassableAll`, `cropBlocks`, `doorBlocks`, `professionBlocks`), built once via `fromServerRegistry()`
 - `BlockSnapshot` (type/passable/solid), `BlockGrid` (coord→snapshot, `null`=unloaded), `VillagerState` (villager properties)
+- `RestockSchedule` - parses `restock-schedule.times` (HH:mm, daytime-only) into sorted ticks; `passId(fullTime)` is a monotonic per-world crossing counter (catches up after sleep/`/time set` jumps), `nextOccurrence(fullTime)`/`formatTick()` back it for display
 
 **EntityListener.java** - Events: `EntityAddToWorldEvent`, `EntityRemoveFromWorldEvent`, `BlockBreakEvent/PlaceEvent` (chunk updates), `InventoryOpenEvent` (optional trade prevention via merchant-inventory check)
 
-**LobotomizeCommand.java** - Brigadier commands registered via `LifecycleEvents.COMMANDS`, permission `lobotomy.command` (op), raycasting for targeting. Wake command clears `isLobotomized` PDC marker.
+**LobotomizeCommand.java** - Brigadier commands registered via `LifecycleEvents.COMMANDS`, permission `lobotomy.command` (op), raycasting for targeting. Wake command clears `isLobotomized` PDC marker. `debug` shows the next scheduled restock time/world when `restock-schedule.mode: schedule` is active.
 
-**VillagerUtils.java** - Maps: `PROFESSION_TO_STATION`, `PROFESSION_TO_SOUND`. Methods: `isJobSiteNearby()` (3x3x3 box), `shouldRestock()` (PDC+day-time logic)
+**VillagerUtils.java** - Maps: `PROFESSION_TO_STATION`, `PROFESSION_TO_SOUND`. Methods: `isJobSiteNearby()` (3x3x3 box), `shouldRestock()`/`allowedToRestock()` (PDC+day-time logic; overloaded with an explicit `maxRestocksPerDay` so schedule mode's cap is the configured schedule length instead of the interval-mode hardcoded 2)
 
 ### Config (read in constructors)
-`check-interval`, `inactive-check-interval`, `restock-interval`, `restock-random-range`, `restock-sound`, `level-up-sound`, `debug`, `chunk-debug`, `create-debug-teams` (Folia-incompatible), `check-roof`, `ignore-non-solid-blocks`, `disable-chunk-villager-updates`, `persist-lobotomized-state`
+`check-interval`, `inactive-check-interval`, `restock-interval`, `restock-random-range`, `restock-schedule.mode` (`interval`|`schedule`), `restock-schedule.times` (HH:mm list, schedule mode only), `restock-sound`, `level-up-sound`, `debug`, `chunk-debug`, `create-debug-teams` (Folia-incompatible), `check-roof`, `ignore-non-solid-blocks`, `disable-chunk-villager-updates`, `persist-lobotomized-state`
 
 ### PDC Keys
-- `lastRestock` (LONG): Last trade refresh timestamp
+- `lastRestock` (LONG): Last trade refresh timestamp (interval mode)
 - `isLobotomized` (BYTE): Persistence marker (when `persist-lobotomized-state: true`)
 - `lastRestockCheckDayTime` (LONG): Full game time (absolute ticks) at last restock check; used for day-rollover detection
+- `lastRestockPassId` (LONG): `RestockSchedule` pass counter at the villager's last successful restock (schedule mode)
 
 ## Development
 
