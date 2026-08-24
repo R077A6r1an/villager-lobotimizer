@@ -155,16 +155,29 @@ public final class RestockSchedule {
     }
 
     /**
-     * Computes a monotonically non-decreasing counter that increases by one each time a scheduled
-     * restock point is crossed. Callers compare a previously stored value against a fresh call for
-     * the same world to cheaply answer "has a new restock opportunity occurred since I last
-     * restocked" — including catch-up after a large forward jump in {@code fullTime} (sleeping
-     * through the night, {@code /time set} moving forward), since every point strictly between the
-     * previous and current {@code fullTime} is counted, not just whichever point the check happens
-     * to land on exactly.
+     * Computes a value that increases every time a new scheduled restock point is crossed, so that
+     * callers can compare a previously stored value against a fresh call for the same world to
+     * cheaply answer "has a new restock opportunity occurred since I last restocked" via plain
+     * {@code >} — including catch-up after a large forward jump in {@code fullTime} (sleeping
+     * through the night, {@code /time set} moving forward), since a jump past several points in one
+     * step still reflects only the single latest one, not a per-point count.
+     *
+     * <p>The returned value is the absolute {@code fullTime} tick of the latest configured point
+     * crossed so far today (offset by {@code +1} so it's never {@code 0}, which is reserved for "no
+     * point has been crossed since the schedule's day started" / the PDC default for "never
+     * restocked"), or {@code 0} if none has been crossed yet today or the schedule is empty.
+     * Deliberately <strong>not</strong> encoded as {@code day * size() + crossedCount}: that earlier
+     * encoding baked the schedule's entry count into the value, so a stored value became
+     * incomparable with a freshly computed one the moment {@code restock-schedule.times} gained or
+     * lost an entry between two {@link RestockSchedule} constructions (e.g. across a server restart
+     * or {@code /lobotomy reload}) — silently stalling restocks for however long it took the new
+     * count's sequence to numerically catch back up. Keying off each point's own absolute tick
+     * instead is unaffected by how many <em>other</em> points are configured, so it stays valid
+     * across any edit to {@code times} without needing to invalidate or migrate a stored value.
      *
      * @param fullTime the world's current {@code World.getFullTime()}
-     * @return {@code 0} if the schedule is empty, otherwise {@code day * size() + pointsCrossedToday}
+     * @return {@code 0} if the schedule is empty or no point has been crossed yet today, otherwise
+     *         the absolute tick of the latest point crossed so far today, plus one
      */
     public long passId(long fullTime) {
         if (isEmpty()) {
@@ -172,16 +185,17 @@ public final class RestockSchedule {
         }
         long day = Math.floorDiv(fullTime, TICKS_PER_DAY);
         long tickOfDay = Math.floorMod(fullTime, TICKS_PER_DAY);
+        long dayStart = day * TICKS_PER_DAY;
 
-        int crossed = 0;
+        long lastCrossed = 0L;
         for (long tick : this.ticks) {
             if (tickOfDay >= tick) {
-                crossed++;
+                lastCrossed = dayStart + tick + 1;
             } else {
                 break;
             }
         }
-        return day * this.ticks.length + crossed;
+        return lastCrossed;
     }
 
     /**

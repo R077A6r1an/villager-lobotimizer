@@ -107,6 +107,18 @@ class VillagerUtilsTest extends MockBukkitTestBase {
     }
 
     @Test
+    void defaultMaxRestocksPerDayMatchesTheImplicitIntervalModeCap() {
+        Villager villager = spawnVillager();
+        int cap = VillagerUtils.defaultMaxRestocksPerDay();
+
+        villager.setRestocksToday(cap);
+        assertFalse(VillagerUtils.allowedToRestock(villager), "the 1-arg overload's implicit cap must match the exposed constant");
+
+        villager.setRestocksToday(cap - 1);
+        assertTrue(VillagerUtils.allowedToRestock(villager));
+    }
+
+    @Test
     void allowedToRestockRespectsExplicitDailyCap() {
         Villager villager = spawnVillager();
 
@@ -130,6 +142,27 @@ class VillagerUtilsTest extends MockBukkitTestBase {
         VillagerUtils.shouldRestock(villager, LAST_RESTOCK_KEY, 3);
 
         assertEquals(0, villager.getRestocksToday(), "crossing a day boundary resets the counter regardless of cap");
+    }
+
+    @Test
+    void shouldRestockTreatsRealTickZeroCheckAsCheckedRatherThanNeverChecked() {
+        Villager villager = spawnVillager();
+        WorldMock world = (WorldMock) villager.getWorld();
+
+        // A real check recorded at world tick 0 (the "never checked" sentinel is -1, not 0).
+        villager.getPersistentDataContainer().set(LAST_RESTOCK_KEY, PersistentDataType.LONG, 0L);
+        villager.setRestocksToday(2);
+
+        // Still day 0: a real prior check at tick 0 must not be reset again just because it's
+        // indistinguishable from "never checked" under the old 0L-default sentinel.
+        world.setFullTime(50L);
+        VillagerUtils.shouldRestock(villager, LAST_RESTOCK_KEY, 2);
+        assertEquals(2, villager.getRestocksToday(), "a same-day recheck must not reset the counter");
+
+        // Crossing into day 1 from that real tick-0 check must still reset normally.
+        world.setFullTime(24_000L + 10L);
+        VillagerUtils.shouldRestock(villager, LAST_RESTOCK_KEY, 2);
+        assertEquals(0, villager.getRestocksToday(), "a day boundary crossed from a real tick-0 check still resets");
     }
 
     @Test

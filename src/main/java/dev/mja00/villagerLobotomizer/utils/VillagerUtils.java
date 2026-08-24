@@ -169,6 +169,11 @@ public class VillagerUtils {
     /** The daily restock cap used in interval mode, a real-time approximation of vanilla behavior. */
     private static final int DEFAULT_MAX_RESTOCKS_PER_DAY = 2;
 
+    /** @return the interval-mode daily restock cap, for display alongside {@code restocksToday}. */
+    public static int defaultMaxRestocksPerDay() {
+        return DEFAULT_MAX_RESTOCKS_PER_DAY;
+    }
+
     /**
      * Determines if a villager is allowed to restock, under the interval-mode daily cap.
      *
@@ -215,11 +220,16 @@ public class VillagerUtils {
      */
     public static boolean shouldRestock(Villager villager, NamespacedKey lastRestockCheckDayTimeKey, int maxRestocksPerDay) {
         PersistentDataContainer pdc = villager.getPersistentDataContainer();
-        long lastRestockCheckDayTime = pdc.getOrDefault(lastRestockCheckDayTimeKey, org.bukkit.persistence.PersistentDataType.LONG, 0L);
+        // -1L (rather than 0L) marks "never checked", distinguishable from a real check recorded
+        // at world tick 0 - a villager whose PDC was bridged across an entity replacement (see
+        // LobotomizeStorage#bridgeRestockState) carries a real prior value here, so this sentinel
+        // only affects the genuinely-never-checked case, which never needs a reset anyway (a
+        // villager with no prior check has never had restocksToday advanced past 0 either).
+        long lastRestockCheckDayTime = pdc.getOrDefault(lastRestockCheckDayTimeKey, org.bukkit.persistence.PersistentDataType.LONG, -1L);
         long fullTime = villager.getWorld().getFullTime();
 
         // Check for new day using Full Time (absolute ticks) to avoid wrapping issues
-        if (lastRestockCheckDayTime > 0L) {
+        if (lastRestockCheckDayTime >= 0L) {
             long lastDay = lastRestockCheckDayTime / 24000L;
             long currentDay = fullTime / 24000L;
             if (currentDay > lastDay) {

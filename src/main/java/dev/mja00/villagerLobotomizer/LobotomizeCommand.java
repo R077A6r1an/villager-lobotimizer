@@ -5,6 +5,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import dev.mja00.villagerLobotomizer.policy.RestockSchedule;
+import dev.mja00.villagerLobotomizer.utils.VillagerUtils;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
@@ -183,6 +184,23 @@ public class LobotomizeCommand {
         message = message.append(Component.text("\nVillager experience: "))
                 .append(Component.text(villager.getVillagerExperience()).color(NamedTextColor.GREEN));
 
+        // Always-shown restock diagnostics, not gated behind config debug: this command is itself
+        // an on-demand debug tool run against one villager, and these three fields are exactly
+        // what's needed to answer "why isn't this villager restocking" - a stale job site (e.g. a
+        // villager that wandered off its workstation while zombified, per the QA report) or a
+        // suspicious lastRestockPassId are otherwise invisible without reading server logs or code.
+        boolean jobSiteNearby = VillagerUtils.isJobSiteNearby(villager);
+        message = message.append(Component.text("\nJob site nearby: "))
+                .append(Component.text(jobSiteNearby).color(jobSiteNearby ? NamedTextColor.GREEN : NamedTextColor.RED));
+
+        int restocksToday = villager.getRestocksToday();
+        int restockCap = this.plugin.getStorage().isScheduleModeActive()
+                ? this.plugin.getStorage().getRestockSchedule().size()
+                : VillagerUtils.defaultMaxRestocksPerDay();
+        message = message.append(Component.text("\nRestocks today: "))
+                .append(Component.text(restocksToday + " / " + restockCap)
+                        .color(restocksToday < restockCap ? NamedTextColor.GREEN : NamedTextColor.RED));
+
         if (this.plugin.getStorage().isScheduleModeActive()) {
             RestockSchedule schedule = this.plugin.getStorage().getRestockSchedule();
             long fullTime = villager.getWorld().getFullTime();
@@ -190,6 +208,8 @@ public class LobotomizeCommand {
             String nextTime = RestockSchedule.formatTick(nextOccurrence % RestockSchedule.TICKS_PER_DAY);
             message = message.append(Component.text("\nNext scheduled restock: "))
                     .append(Component.text(nextTime + " (" + villager.getWorld().getName() + ")").color(NamedTextColor.GREEN));
+            message = message.append(Component.text("\nLast restock pass id: "))
+                    .append(Component.text(this.plugin.getStorage().getLastRestockPassId(villager)).color(NamedTextColor.GREEN));
         }
 
         source.getSender().sendMessage(message);

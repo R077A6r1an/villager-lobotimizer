@@ -24,6 +24,7 @@ import org.bukkit.SoundCategory;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Vehicle;
 import org.bukkit.entity.Villager;
 import org.bukkit.inventory.MerchantRecipe;
@@ -234,6 +235,16 @@ public class LobotomizeStorage {
         return this.restockSchedule;
     }
 
+    /**
+     * @return the {@code lastRestockPassId} PDC value recorded at the villager's last successful
+     *         restock under {@code schedule} mode, or {@code 0} if it has never restocked under
+     *         that mode. Exposed for {@code /lobotomy debug}'s diagnostic display.
+     */
+    public long getLastRestockPassId(@NotNull Villager villager) {
+        return villager.getPersistentDataContainer()
+                .getOrDefault(this.lastRestockPassIdKey, PersistentDataType.LONG, 0L);
+    }
+
     // Order is remove-then-add so the brief intermediate state is "in neither set"
     // rather than "in both" — readers seeing a momentary gap simply skip a tick.
     private void setActive(@NotNull Villager v) {
@@ -342,6 +353,43 @@ public class LobotomizeStorage {
             } else {
                 this.logger.info("[Debug] Attempted to untrack villager " + villager + " (" + villager.getUniqueId() + "), but it was not tracked");
             }
+        }
+    }
+
+    /**
+     * Copies the plugin's restock/lobotomization PDC state from one entity to another.
+     *
+     * Villager infection and curing (villager &lt;-&gt; zombie villager) replace the entity object
+     * entirely rather than mutating it in place, so anything this plugin keyed off the old
+     * entity's {@link PersistentDataContainer} would otherwise silently reset on the new one -
+     * {@code isLobotomized} would stop re-lobotomizing the villager on sight, and
+     * {@code lastRestock}/{@code lastRestockCheckDayTime}/{@code lastRestockPassId} would let it
+     * bypass its daily restock cap. Call this from an {@code EntityTransformEvent} handler with
+     * the pre-transform entity as {@code source} and the post-transform entity as {@code target},
+     * for both the infection and the cure hop, so state survives even through the intermediate
+     * zombie villager stage.
+     *
+     * @param source the pre-transform entity
+     * @param target the post-transform entity
+     */
+    public void bridgeRestockState(@NotNull LivingEntity source, @NotNull LivingEntity target) {
+        PersistentDataContainer from = source.getPersistentDataContainer();
+        PersistentDataContainer to = target.getPersistentDataContainer();
+        copyIfPresent(from, to, this.key, PersistentDataType.LONG);
+        copyIfPresent(from, to, this.lobotomizedKey, PersistentDataType.BYTE);
+        copyIfPresent(from, to, this.lastRestockCheckDayTimeKey, PersistentDataType.LONG);
+        copyIfPresent(from, to, this.lastRestockPassIdKey, PersistentDataType.LONG);
+
+        if (this.plugin.isDebugging()) {
+            this.logger.info("[Debug] Bridged restock/lobotomization PDC state from " + source.getUniqueId()
+                    + " to " + target.getUniqueId());
+        }
+    }
+
+    private <T, Z> void copyIfPresent(@NotNull PersistentDataContainer from, @NotNull PersistentDataContainer to,
+                                       @NotNull NamespacedKey key, @NotNull PersistentDataType<T, Z> type) {
+        if (from.has(key, type)) {
+            to.set(key, type, from.get(key, type));
         }
     }
 

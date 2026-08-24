@@ -37,11 +37,10 @@ class RestockScheduleTest {
         assertEquals("13:00", RestockSchedule.formatTick(7000L));
 
         // passId uses ">=" at the boundary, so landing exactly on a scheduled tick already counts
-        // as crossed: at 08:00 one point has fired, at 10:30 two, at 13:00 all three (wrapping
-        // back to a %3 remainder of 0).
-        assertEquals(1, schedule.passId(2000L) % 3);
-        assertEquals(2, schedule.passId(4500L) % 3);
-        assertEquals(0, schedule.passId(7000L) % 3);
+        // as crossed, and encodes the absolute tick (+1) of the latest point crossed so far today.
+        assertEquals(2001L, schedule.passId(2000L));
+        assertEquals(4501L, schedule.passId(4500L));
+        assertEquals(7001L, schedule.passId(7000L));
     }
 
     @Test
@@ -145,20 +144,50 @@ class RestockScheduleTest {
         long beforeAnyPoint = schedule.passId(500L);   // ~06:30, nothing crossed
         long afterJumpPastTwoPoints = schedule.passId(6000L); // ~12:00, past 08:00 and 10:30
 
-        assertEquals(2, afterJumpPastTwoPoints - beforeAnyPoint,
+        // passId encodes the absolute tick of the *latest* point crossed, not a per-point count, so
+        // a multi-point jump reflects as one increase (to 10:30's tick), not a jump of "2".
+        assertTrue(afterJumpPastTwoPoints > beforeAnyPoint,
                 "jumping past two schedule points at once must be reflected, not silently dropped");
+        assertEquals(4501L, afterJumpPastTwoPoints, "encodes 10:30 (tick 4500), the latest point crossed");
     }
 
     @Test
-    void passIdIsNonDecreasingAcrossADayRollover() {
+    void passIdAtDayRolloverDoesNotExceedPreviousDaysLastCrossedValueBeforeItsOwnFirstPoint() {
         RestockSchedule schedule = RestockSchedule.parse(List.of("08:00", "10:30", "13:00"));
 
         long endOfDayOne = schedule.passId(TICKS_PER_DAY - 1);       // last tick of day 0, all 3 points crossed
         long startOfDayTwo = schedule.passId(TICKS_PER_DAY);         // first tick of day 1, none crossed yet
         long afterFirstPointDayTwo = schedule.passId(TICKS_PER_DAY + 2000L);
 
-        assertEquals(endOfDayOne, startOfDayTwo, "day rollover with no points crossed yet must not lose progress");
-        assertTrue(afterFirstPointDayTwo > startOfDayTwo, "crossing day two's first point must increase passId");
+        // Day two's passId resets to 0 until its own first point is crossed - it must never look
+        // like a fresh opportunity relative to whatever was already consumed on day one.
+        assertTrue(startOfDayTwo <= endOfDayOne,
+                "day rollover with no points crossed yet on the new day must not look like a new opportunity");
+        assertTrue(afterFirstPointDayTwo > endOfDayOne,
+                "crossing day two's first point must exceed whatever was consumed on day one");
+    }
+
+    @Test
+    void passIdComparisonRemainsValidWhenScheduleSizeChangesAcrossReload() {
+        // Regression test for the QA-reported bug: the old day * size() + crossed encoding made a
+        // stored passId incomparable with a freshly computed one whenever restock-schedule.times'
+        // entry count changed between two RestockSchedule constructions (e.g. across a restart or
+        // /lobotomy reload) - most damagingly when the count *shrank*, which could stall restocks
+        // for many in-game days. The new encoding must be stable regardless of size() changing.
+        RestockSchedule threePoints = RestockSchedule.parse(List.of("08:00", "10:30", "13:00"));
+        long storedAfterAllThreeCrossed = threePoints.passId(TICKS_PER_DAY - 1); // end of day 0
+
+        RestockSchedule oneShrunkPoint = RestockSchedule.parse(List.of("08:00")); // times shrunk to 1 entry
+        long nextDaysCrossing = oneShrunkPoint.passId(TICKS_PER_DAY + 2000L); // day 1's 08:00
+
+        assertTrue(nextDaysCrossing > storedAfterAllThreeCrossed,
+                "a real later crossing under a smaller schedule must still exceed a value stored under the larger one");
+
+        RestockSchedule fourGrownPoints = RestockSchedule.parse(List.of("08:00", "10:30", "13:00", "17:00"));
+        long grownScheduleNextDay = fourGrownPoints.passId(TICKS_PER_DAY + 2000L); // day 1's 08:00
+
+        assertTrue(grownScheduleNextDay > storedAfterAllThreeCrossed,
+                "a real later crossing under a larger schedule must still exceed a value stored under the smaller one");
     }
 
     // ---- nextOccurrence ----

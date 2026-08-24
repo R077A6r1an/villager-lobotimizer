@@ -5,6 +5,7 @@ import java.util.logging.Level;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Villager;
 import org.bukkit.event.EventHandler;
@@ -12,6 +13,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityTransformEvent;
 import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.ChunkUnloadEvent;
@@ -81,6 +83,31 @@ public class EntityListener implements Listener {
             if (this.plugin.isDebugging()) {
                 this.plugin.getLogger().log(Level.INFO, "[Debug] Caught {0} for villager {1} ({2}); The villager should have been removed from the storage", new Object[]{event.getEventName(), event.getEntity(), event.getEntity().getUniqueId()});
             }
+        }
+    }
+
+    /**
+     * Bridges restock/lobotomization PDC state across a villager infection or cure, since both
+     * replace the entity object entirely rather than mutating it in place - see
+     * {@link dev.mja00.villagerLobotomizer.LobotomizeStorage#bridgeRestockState}.
+     */
+    @EventHandler
+    public final void onTransform(EntityTransformEvent event) {
+        EntityTransformEvent.TransformReason reason = event.getTransformReason();
+        if (reason != EntityTransformEvent.TransformReason.INFECTION
+                && reason != EntityTransformEvent.TransformReason.CURED) {
+            return;
+        }
+
+        if (!(event.getEntity() instanceof LivingEntity source) || !(event.getTransformedEntity() instanceof LivingEntity target)) {
+            return;
+        }
+
+        this.plugin.getStorage().bridgeRestockState(source, target);
+
+        if (this.plugin.isDebugging()) {
+            this.plugin.getLogger().log(Level.INFO, "[Debug] Caught {0} ({1}) for {2} ({3}) -> {4} ({5}); bridged restock/lobotomization state",
+                    new Object[]{event.getEventName(), reason, source, source.getUniqueId(), target, target.getUniqueId()});
         }
     }
 

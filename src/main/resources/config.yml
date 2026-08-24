@@ -19,6 +19,7 @@ restock-random-range: 0
 
 #Restock scheduling mode. "interval" = legacy real-time timer (restock-interval/restock-random-range above).
 #"schedule" = fixed in-game daily clock times (restock-schedule.times below), independent of real-world elapsed time.
+#IMPORTANT: populating "times" below does nothing by itself - mode must be set to "schedule" for it to take effect.
 restock-schedule:
   mode: "interval"
 

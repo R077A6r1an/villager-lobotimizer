@@ -29,11 +29,12 @@ Note: The project is misspelled on purpose. You'll need to use VillagerLobotomiz
 - `VillagerActivityPolicy.shouldBeActive(VillagerState, BlockGrid)` - decision rules + `canMoveCardinally`/`canMoveThrough`/`testImpassable`
 - `BlockClassifier` - Material sets (`impassableRegular`, `impassableTall`, `impassableAll`, `cropBlocks`, `doorBlocks`, `professionBlocks`), built once via `fromServerRegistry()`
 - `BlockSnapshot` (type/passable/solid), `BlockGrid` (coord→snapshot, `null`=unloaded), `VillagerState` (villager properties)
-- `RestockSchedule` - parses `restock-schedule.times` (HH:mm, daytime-only) into sorted ticks; `passId(fullTime)` is a monotonic per-world crossing counter (catches up after sleep/`/time set` jumps), `nextOccurrence(fullTime)`/`formatTick()` back it for display
+- `RestockSchedule` - parses `restock-schedule.times` (HH:mm, daytime-only) into sorted ticks; `passId(fullTime)` returns the absolute tick (+1) of the latest configured point crossed so far today, or `0` if none has (catches up after sleep/`/time set` jumps; deliberately not `day * size() + crossedCount`, since that older encoding became incomparable with a freshly computed value whenever `restock-schedule.times`' entry count changed between two `RestockSchedule` constructions, e.g. across a restart or `/lobotomy reload`), `nextOccurrence(fullTime)`/`formatTick()` back it for display
 
-**EntityListener.java** - Events: `EntityAddToWorldEvent`, `EntityRemoveFromWorldEvent`, `BlockBreakEvent/PlaceEvent` (chunk updates), `InventoryOpenEvent` (optional trade prevention via merchant-inventory check)
+**EntityListener.java** - Events: `EntityAddToWorldEvent`, `EntityRemoveFromWorldEvent`, `BlockBreakEvent/PlaceEvent` (chunk updates), `InventoryOpenEvent` (optional trade prevention via merchant-inventory check), `EntityTransformEvent` (`INFECTION`/`CURED` only - bridges restock/lobotomization PDC state across the villager↔zombie villager entity replacement via `LobotomizeStorage.bridgeRestockState`, since Bukkit fires these as a brand-new entity rather than mutating the original in place)
 
 **LobotomizeCommand.java** - Brigadier commands registered via `LifecycleEvents.COMMANDS`, permission `lobotomy.command` (op), raycasting for targeting. Wake command clears `isLobotomized` PDC marker. `debug` shows the next scheduled restock time/world when `restock-schedule.mode: schedule` is active.
+- Per-villager `debug` output always shows job-site-nearby, restocks-today/cap (schedule mode's cap is `RestockSchedule.size()`, interval mode's is `VillagerUtils.defaultMaxRestocksPerDay()`), and (schedule mode only) the raw `lastRestockPassId` value via `LobotomizeStorage.getLastRestockPassId()` - not gated behind `plugin.isDebugging()`, since the command itself is an on-demand debug tool.
 
 **VillagerUtils.java** - Maps: `PROFESSION_TO_STATION`, `PROFESSION_TO_SOUND`. Methods: `isJobSiteNearby()` (3x3x3 box), `shouldRestock()`/`allowedToRestock()` (PDC+day-time logic; overloaded with an explicit `maxRestocksPerDay` so schedule mode's cap is the configured schedule length instead of the interval-mode hardcoded 2)
 
@@ -45,6 +46,7 @@ Note: The project is misspelled on purpose. You'll need to use VillagerLobotomiz
 - `isLobotomized` (BYTE): Persistence marker (when `persist-lobotomized-state: true`)
 - `lastRestockCheckDayTime` (LONG): Full game time (absolute ticks) at last restock check; used for day-rollover detection
 - `lastRestockPassId` (LONG): `RestockSchedule` pass counter at the villager's last successful restock (schedule mode)
+- All four PDC keys above (`lastRestock`, `isLobotomized`, `lastRestockCheckDayTime`, `lastRestockPassId`) are bridged across a villager's infection/cure by `EntityListener`'s `EntityTransformEvent` handler, since that transform replaces the entity object rather than mutating it in place
 
 ## Development
 

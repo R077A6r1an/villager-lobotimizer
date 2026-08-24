@@ -54,6 +54,7 @@ restock-random-range: 0
 
 #Restock scheduling mode. "interval" = legacy real-time timer (restock-interval/restock-random-range above).
 #"schedule" = fixed in-game daily clock times (restock-schedule.times below), independent of real-world elapsed time.
+#IMPORTANT: populating "times" below does nothing by itself - mode must be set to "schedule" for it to take effect.
 restock-schedule:
   mode: "interval"
 
@@ -136,7 +137,17 @@ Villager trades can be refreshed in one of two modes, set via `restock-schedule.
   with no randomization. If `mode: schedule` is set but no valid times are configured, the plugin
   falls back to `interval` behavior and logs a warning.
 
-`/lobotomy debug` shows the next scheduled restock time when `schedule` mode is active.
+**`restock-schedule.mode` must be explicitly set to `"schedule"` to enable the new behavior.** The
+shipped default `config.yml` ships `restock-schedule.times` pre-populated with an example, but
+`mode` still defaults to `"interval"` — populating `times` alone has no effect until `mode` is
+changed. After switching modes or editing `times`, apply the change with `/lobotomy reload` (or a
+restart); avoid changing the *number* of entries in `times` on a live server with villagers that
+have already restocked under the previous list unless you're running a version that includes the
+restock-schedule stability fix from `reports/QA_report_24082026_1.md`.
+
+`/lobotomy debug` shows the next scheduled restock time, plus job-site-nearby, restocks-today/cap,
+and (in `schedule` mode) the raw `lastRestockPassId` PDC value for a targeted villager — useful for
+diagnosing why a specific villager isn't restocking.
 
 ## Special Villager Names
 

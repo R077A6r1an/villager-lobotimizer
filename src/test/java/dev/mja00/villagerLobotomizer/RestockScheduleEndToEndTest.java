@@ -156,7 +156,9 @@ class RestockScheduleEndToEndTest extends MockBukkitTestBase {
         assertTrue(tradesWereReset(villager), "the 08:00 point already fired, villager should restock");
         assertEquals(1, villager.getRestocksToday());
         assertFalse(villager.isAware(), "still lobotomized");
-        assertEquals(1L, villager.getPersistentDataContainer()
+        // passId encodes the absolute tick (+1) of the latest point crossed, not a per-day count -
+        // 08:00 is tick 2000, so the stored value is 2001.
+        assertEquals(2001L, villager.getPersistentDataContainer()
                 .get(new org.bukkit.NamespacedKey(plugin, "lastRestockPassId"), PersistentDataType.LONG));
     }
 
@@ -214,5 +216,52 @@ class RestockScheduleEndToEndTest extends MockBukkitTestBase {
                 .get(new org.bukkit.NamespacedKey(plugin, "lastRestockPassId"), PersistentDataType.LONG);
         assertEquals(plugin.getStorage().getRestockSchedule().passId(world.getFullTime()), storedPassId,
                 "the PDC marker should record the exact pass id consumed, for correct gating after a reload");
+        assertEquals(storedPassId, plugin.getStorage().getLastRestockPassId(villager),
+                "the /lobotomy debug accessor must read back the same value written during the restock");
+    }
+
+    @Test
+    void getLastRestockPassIdDefaultsToZeroBeforeAnyScheduleModeRestock() {
+        loadPluginWithSchedule(List.of("08:00"));
+        world.setFullTime(500L); // before the scheduled point
+
+        Villager villager = spawnDueVillager(new Location(world, 0, 64, 0));
+        plugin.getStorage().addVillager(villager);
+
+        assertEquals(0L, plugin.getStorage().getLastRestockPassId(villager),
+                "a villager that has never restocked under schedule mode has no PDC value yet");
+    }
+
+    @Test
+    void restockKeepsWorkingAfterTimesListShrinksAcrossReload() {
+        // Regression test for the QA-reported "inconsistent restocks after a restart" bug: the
+        // villager's lastRestockPassId is stored under the 3-point schedule below, then
+        // restock-schedule.times is edited down to a single entry and the plugin is reloaded -
+        // exactly what an admin does when tuning restock-schedule.times and restarting/reloading
+        // to apply it. Restocking must not stall afterwards.
+        loadPluginWithSchedule(List.of("08:00", "10:30", "13:00")); // size 3
+        world.setFullTime(8000L); // past all three points (13:00 = tick 7000)
+
+        Villager villager = spawnDueVillager(new Location(world, 0, 64, 0));
+        plugin.getStorage().addVillager(villager);
+        tick(villager, CHECK_INTERVAL_TICKS + 1);
+        assertEquals(1, villager.getRestocksToday(), "precondition: first restock consumed under the 3-point schedule");
+
+        // Simulate editing restock-schedule.times down to one entry, then restarting/reloading.
+        plugin.getConfig().set("restock-schedule.times", List.of("08:00"));
+        plugin.saveConfig();
+        assertTrue(plugin.reloadPluginState() >= 0, "reload with a shrunk schedule must succeed");
+
+        // Use up a trade again and advance to the next day's (now the only) scheduled point.
+        MerchantRecipe usedAgain = new MerchantRecipe(new ItemStack(Material.EMERALD), 16);
+        usedAgain.setUses(2);
+        villager.setRecipes(List.of(usedAgain));
+        world.setFullTime(24_000L + 2000L); // day 1's 08:00
+
+        tick(villager, CHECK_INTERVAL_TICKS + 1);
+
+        assertTrue(tradesWereReset(villager),
+                "shrinking restock-schedule.times across a reload must not stall restocking");
+        assertEquals(1, villager.getRestocksToday(), "day rollover resets the counter before the new restock");
     }
 }

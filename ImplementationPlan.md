@@ -251,3 +251,291 @@ doesn't exist).
 This order keeps every step independently buildable and testable: steps 1–2 land with zero
 behavior change for existing servers (still defaulting to `mode: interval`), and step 3 onward is
 additive and gated entirely behind the new `mode: schedule` opt-in.
+
+---
+
+## 11. QA Follow-Up: Bug Fix Milestones (post-launch)
+
+Testing department confirmed both of the following as **real bugs**, reproducible with the feature
+configured correctly (`mode: "schedule"`, valid `times`). Root-caused in
+`reports/QA_report_24082026_1.md`; this section turns that report into the next implementation
+milestones, in the order they should land. Both bugs also affect `mode: interval` (they predate
+this feature's `restock-schedule` work at the `PersistentDataContainer`/native-field level), so
+fixing them benefits both modes, not just `schedule`.
+
+| Milestone | Bug (QA report §) | Priority | Depends on |
+|---|---|---|---|
+| A | §1 — zombify→cure breaks restock/level-up | High | none |
+| B | §2 — `passId` unstable across `times` edits | High | none (independent of A) |
+| C | §3 — docs/diagnostics to prevent recurrence | Medium | A, B (debug fields read the keys they touch) |
+
+A and B are independent and can be implemented/reviewed in parallel; C should land last since its
+debug-output additions are most useful once A and B's fixes (and their new/changed PDC semantics)
+are in place.
+
+---
+
+### 11.1 Milestone A — Preserve restock/lobotomization state across zombify → cure — **Implemented**
+
+`EntityListener.onTransform` + `LobotomizeStorage.bridgeRestockState` + the `VillagerUtils`
+sentinel change landed, with `EntityTransformBridgeTest` (MockBukkit, fires
+`EntityTransformEvent` directly per A5's testing note) and two new `VillagerUtilsTest` cases.
+Full suite green (`./gradlew test`). One refinement made during implementation, deviating from
+this section's original A4 sketch — noted here rather than rewritten above so the "resolved
+design decisions" table stays a record of what was decided *before* implementation:
+
+- **A4, as implemented:** the sentinel changed from `0L` to `-1L` as planned, but the guard stayed
+  "only reset when a real prior value is known" (`lastRestockCheckDayTime >= 0L`), **not** "force a
+  reset whenever unknown". An earlier draft of this fix forced a reset on "never checked", but that
+  breaks the same continuity A1 requires — a villager whose PDC bridge worked correctly (A2/A3)
+  legitimately reaches the "never checked" state only when it truly is fresh (native `restocksToday`
+  is then also genuinely `0`, so nothing needs resetting); forcing a reset there is redundant for
+  that case and actively wrong for a hypothetical future entity-replacement path that isn't bridged
+  yet, since it would silently re-introduce the A1 exploit (an unbridged reset path could be used to
+  force a free cap reset). The `0L`→`-1L` change is therefore narrower than first sketched: it only
+  fixes the genesis-tick edge case (a **real** check recorded at world tick 0 is no longer
+  indistinguishable from "never checked"), confirmed by
+  `shouldRestockTreatsRealTickZeroCheckAsCheckedRatherThanNeverChecked`. The actual fix for the bug
+  reported by QA is entirely carried by A2/A3 (the PDC bridge itself) — A4 is exactly the
+  defense-in-depth it was scoped as, not a second independent fix for the same symptom.
+
+**Root cause (QA report §1):** `isLobotomized`, `lastRestockPassId`, `lastRestockCheckDayTime`,
+and `lastRestock` all live in the villager's PDC. Villager → Zombie Villager infection and
+Zombie Villager → Villager curing are entity *replacements* (new object, new UUID), and nothing in
+this codebase listens for `EntityTransformEvent` to carry PDC values across that replacement, so
+they silently reset to their defaults on the cured entity. `VillagerUtils.shouldRestock`'s
+day-rollover guard (`lastRestockCheckDayTime > 0L`) compounds this: because it can't tell "never
+checked" apart from "reset to zero", a stale `restocksToday` count that *did* survive on the
+native entity (profession/level/experience/gossip are documented vanilla `VillagerData` fields
+that the conversion process is designed to preserve) is never rolled back to 0 by the plugin,
+potentially leaving the villager stuck at its old cap for up to a full extra in-game day.
+
+#### Resolved design decisions
+
+| # | Question | Decision |
+|---|---|---|
+| A1 | Continuity vs. fresh reset on cure | **Continuity: copy the plugin's PDC state forward.** Resetting the villager to a "fresh" state instead (ignoring what it already did today) was considered and **rejected** — it would let a player bypass the daily restock cap on demand by repeatedly infecting and curing a villager (feed a zombie villager a golden apple + ring a bell to force a resync). Copying state forward keeps a cured villager exactly as capped/leveled as it was a moment before infection, which is the only option that isn't exploitable. |
+| A2 | Which PDC keys to bridge | All four: `isLobotomized`, `lastRestockPassId`, `lastRestockCheckDayTime`, `lastRestock`. Bridging `isLobotomized` also removes the current one-`check-interval`-tick window where a cured villager is briefly treated as "active" before `processVillager` re-lobotomizes it (harmless today, but no longer necessary once the marker travels with the entity). |
+| A3 | Where to intercept | A new `EntityTransformEvent` handler in `EntityListener`, for both `TransformReason.INFECTION` (Villager → Zombie Villager) and `TransformReason.CURED` (Zombie Villager → Villager). The event exposes both the pre-transform entity (`event.getEntity()`) and the post-transform entity (`event.getTransformedEntity()`) together, so PDC values can be copied directly between them without needing an intermediate cache keyed by UUID. Concretely: infection copies plugin PDC from the Villager onto the *Zombie Villager* (which can hold arbitrary PDC like any entity, even though this plugin never tracks zombie villagers itself), and curing copies it back off the Zombie Villager onto the newly created Villager. This uses the zombie villager stage purely as a carrier — no new plugin-level cache/map is introduced. |
+| A4 | Day-rollover sentinel | Change `VillagerUtils.shouldRestock`'s rollover guard from `lastRestockCheckDayTime > 0L` to an explicit "has a previous check ever been recorded" sentinel (default `-1L` instead of `0L`) so a reset/absent PDC value can never silently skip the rollover reset of `restocksToday`, regardless of *why* it was reset. This is defense-in-depth beyond A2/A3 — with the PDC bridge in place this guard should no longer be exercised by the zombify/cure path specifically, but it closes the same class of bug for any other future or existing path that clears this key without also resetting the native counter. |
+| A5 | Event ordering risk | Bukkit/Paper does not guarantee `EntityTransformEvent` fires before the resulting entity's `EntityAddToWorldEvent` via listener priority (they're different event types — priority only orders listeners of the *same* event). The expected/causal order is transform-before-add (the transform is what causes the new entity to be added), and PDC is written directly onto the `event.getTransformedEntity()` object rather than depending on it already being in the world, so the write should be visible by the time `EntityListener.onAdd`/`LobotomizeStorage.addVillager()` runs regardless of exact event-firing order. **This assumption must be confirmed with a manual `/runServer` test** (see Testing below) before this milestone is considered done, since MockBukkit cannot simulate real disease/curing to exercise the natural ordering end-to-end. |
+
+#### Code changes
+
+**`src/main/java/dev/mja00/villagerLobotomizer/listeners/EntityListener.java`**
+- Add:
+  ```java
+  @EventHandler
+  public final void onTransform(EntityTransformEvent event) {
+      if (event.getTransformReason() != EntityTransformEvent.TransformReason.INFECTION
+              && event.getTransformReason() != EntityTransformEvent.TransformReason.CURED) {
+          return;
+      }
+      if (!(event.getEntity() instanceof LivingEntity source)
+              || !(event.getTransformedEntity() instanceof LivingEntity target)) {
+          return;
+      }
+      this.plugin.getStorage().bridgeRestockState(source, target);
+  }
+  ```
+- `bridgeRestockState` is intentionally reason-agnostic (same copy both directions) since both the
+  Villager→Zombie Villager and Zombie Villager→Villager hops need the exact same PDC keys copied.
+
+**`src/main/java/dev/mja00/villagerLobotomizer/LobotomizeStorage.java`**
+- Add a package-visible `bridgeRestockState(LivingEntity source, LivingEntity target)` method next
+  to the existing `NamespacedKey` fields, copying `key`, `lobotomizedKey`,
+  `lastRestockCheckDayTimeKey`, and `lastRestockPassIdKey` (whichever are present — `PDC.has(...)`
+  guarded, no-op for absent ones) from `source.getPersistentDataContainer()` to
+  `target.getPersistentDataContainer()`. Keeping this in `LobotomizeStorage` (rather than
+  `EntityListener`) matches the existing pattern of `LobotomizeStorage` owning all
+  `NamespacedKey`/PDC access, and means `EntityListener` doesn't need its own copies of the keys.
+
+**`src/main/java/dev/mja00/villagerLobotomizer/utils/VillagerUtils.java`**
+- `shouldRestock` (`VillagerUtils.java:216-233`): change the default read from
+  `pdc.getOrDefault(lastRestockCheckDayTimeKey, PersistentDataType.LONG, 0L)` to a `-1L` default,
+  and the guard from `if (lastRestockCheckDayTime > 0L)` to `if (lastRestockCheckDayTime >= 0L)`.
+  `0L` remains a perfectly valid *real* recorded value (world tick 0); only the default sentinel
+  changes.
+
+#### Tests
+
+- **MockBukkit, new — `EntityTransformBridgeTest.java`**: since MockBukkit cannot simulate actual
+  zombie infection/curing AI, construct the scenario directly: spawn a `VillagerMock`, set its
+  `isLobotomized`/`lastRestockPassId`/`lastRestockCheckDayTime` PDC values and `restocksToday` to
+  simulate "already at the daily cap mid-day", spawn a `ZombieVillagerMock` standing in for the
+  transformed entity, fire `EntityTransformEvent` via
+  `server.getPluginManager().callEvent(...)` with `TransformReason.INFECTION`, and assert the PDC
+  values landed on the zombie villager. Then fire a second `EntityTransformEvent` with
+  `TransformReason.CURED` from that zombie villager to a fresh `VillagerMock`, and assert the
+  original PDC values (including the daily cap state) landed on the new villager unchanged —
+  proving continuity, not a free reset (guards against re-introducing the A1 exploit).
+- **`utils/VillagerUtilsTest.java` (extend)**: a case that starts with the PDC key entirely absent
+  (simulating a freshly-created entity, sentinel `-1L`) and a native `restocksToday` already at the
+  cap, asserting the very first `shouldRestock` call now correctly resets `restocksToday` to 0
+  when the current day differs from tick 0 — the exact scenario A4 fixes.
+- **Manual `/runServer` verification (required before closing this milestone):** lobotomize a
+  villager in a trading hall, deplete its trades to the daily cap, let a zombie infect it, cure it
+  with a golden apple + bell, and confirm via `/lobotomy debug` that it resumes restocking/leveling
+  on schedule rather than needing a full extra day — this is the only way to confirm assumption A5
+  and the real-vanilla-NBT-persistence assumption underlying the root cause analysis.
+
+---
+
+### 11.2 Milestone B — Make `passId` comparisons stable across `restock-schedule.times` edits — **Implemented**
+
+`RestockSchedule.passId` now returns the absolute `fullTime` tick (+1) of the latest configured
+point crossed so far today, rather than `day * size() + crossed`, exactly per decision B1/B2 below
+— no PDC key rename, no migration code. Three existing `RestockScheduleTest` assertions that
+hardcoded the old encoding's values were updated to the new ones (`passId` returning e.g. `2001`
+instead of a small per-day count), and a new
+`passIdComparisonRemainsValidWhenScheduleSizeChangesAcrossReload` test proves comparisons stay
+valid whether `times` grows or shrinks. A new MockBukkit end-to-end test,
+`restockKeepsWorkingAfterTimesListShrinksAcrossReload`, drives the exact regression scenario
+through a real `plugin.reloadPluginState()` call (3 times → 1 time, matching the QA report's
+"admin edits the config and restarts" framing) and confirms restocking doesn't stall. Full suite
+green (`./gradlew test`, 82 tests including these).
+
+**Root cause (QA report §2):** `RestockSchedule.passId(fullTime)` encodes
+`day * ticks.length + crossed` (`policy/RestockSchedule.java:169-185`). `ticks.length` (i.e.
+`restockSchedule.size()`) is re-derived from config on every `LobotomizeStorage` construction
+(server start, `/lobotomy reload`). A villager's stored `lastRestockPassId` PDC value was encoded
+under whichever `size()` was active when it was written. If the accepted `times` entry count
+changes before the next read — including via silent near-duplicate dedup, not just an intentional
+edit — the stored value and a freshly computed `currentPassId` are no longer comparable, and
+`currentPassId > lastRestockPassId` can spuriously read `false` for as many in-game days as it
+takes the new sequence to numerically catch up, silently stalling restocks with no error or
+warning.
+
+#### Resolved design decision
+
+| # | Question | Decision |
+|---|---|---|
+| B1 | Fix approach | **Redesign the `passId` formula to be size-independent, keep the method name and its public contract** ("monotonically non-decreasing per world; a later call for a larger `fullTime` never returns a smaller value; comparable via plain `>`"). Rejected alternative: store `size()` (or a schedule hash/version) alongside `lastRestockPassId` and treat any mismatch as invalidated — this works but requires a second PDC key and an explicit invalidation branch at every read site; encoding the schedule point's own absolute tick instead makes the value inherently comparable with no extra key or branch, since absolute ticks never depend on how many *other* points are configured. |
+| B2 | New encoding | `passId(fullTime)` returns `dayStart + tick + 1` for the **latest** configured tick-of-day crossed so far today (`0` if none has been crossed yet today or the schedule is empty), where `dayStart = day * TICKS_PER_DAY`. The `+1` keeps every real crossing's value `>= 1`, so it's unambiguously distinguishable from the PDC default-read sentinel `0L` ("never restocked under schedule mode") — this preserves the existing `pdc.getOrDefault(this.lastRestockPassIdKey, PersistentDataType.LONG, 0L)` call at `LobotomizeStorage.java:724` unchanged. |
+| B3 | Multiple points crossed in one jump | Unchanged behavior, verified by existing test `villagerCatchesUpAfterSleepingPastMultipleScheduledPoints`: `passId` under the new encoding still only reflects the single *latest* point crossed (not a per-point count), so one restock action still clears all due trades at once rather than firing once per skipped point. |
+| B4 | Upgrade/compatibility path | **No explicit migration.** A villager with an old-encoding `lastRestockPassId` (a small `day * oldSize + crossed` integer) will almost always compare as smaller than a freshly computed new-encoding value (an absolute tick, typically in the tens of thousands or more), so upgrading this fix produces **at most one bonus catch-up restock per villager** the next time each is checked, then behaves correctly forever after. This is the same class of benign one-time effect as a version bump and needs no dedicated handling — call it out in the CHANGELOG/release notes rather than writing migration code for it. |
+
+#### Code changes
+
+**`src/main/java/dev/mja00/villagerLobotomizer/policy/RestockSchedule.java`**
+- Replace the `passId` body (`policy/RestockSchedule.java:169-185`):
+  ```java
+  public long passId(long fullTime) {
+      if (isEmpty()) {
+          return 0L;
+      }
+      long day = Math.floorDiv(fullTime, TICKS_PER_DAY);
+      long tickOfDay = Math.floorMod(fullTime, TICKS_PER_DAY);
+      long dayStart = day * TICKS_PER_DAY;
+
+      long lastCrossed = 0L;
+      for (long tick : this.ticks) {
+          if (tickOfDay >= tick) {
+              lastCrossed = dayStart + tick + 1;
+          } else {
+              break;
+          }
+      }
+      return lastCrossed;
+  }
+  ```
+- Update the method's Javadoc to state the new contract explicitly: the returned value no longer
+  depends on `size()`/`ticks.length` and remains meaningfully comparable across a config reload
+  that changes the number or positions of configured `times`, which is the property the old
+  encoding was missing.
+- `size()` itself is untouched and still used as-is for the daily cap
+  (`VillagerUtils.allowedToRestock(villager, restockSchedule.size())`) — that usage was never the
+  problem; only the stored-comparison value was.
+
+#### Tests
+
+- **`policy/RestockScheduleTest.java` (extend)**: construct a schedule `A` with `times =
+  ["08:00"]`, compute `passIdA = A.passId(fullTime)` after crossing it; construct a *different*
+  schedule `B` with `times = ["08:00", "10:30", "13:00"]` for the same `fullTime` window, and
+  assert `B`'s `passId` progression is still strictly increasing against `passIdA` as `fullTime`
+  advances — i.e., swapping the schedule's size never makes a later `fullTime` produce a smaller or
+  equal `passId` than an earlier one did under a different-sized schedule. Also assert the specific
+  regression scenario from the QA report: a schedule shrinking from 3 entries to 1 does not require
+  multiple in-game days to "catch up" to a previously stored larger-size-encoded value under the
+  fix (this is really validating the *new* code has no such catch-up delay at all, since it no
+  longer depends on size).
+- **`RestockScheduleEndToEndTest.java` (extend)**: new test
+  `restockKeepsWorkingAfterTimesListSizeChangesAcrossReload` — mirrors the existing
+  `restockPersistsAcrossReconstructedStorageViaPdc` test but reconstructs `LobotomizeStorage` with
+  a **different** `times` list (both a larger and a smaller variant, as two sub-cases) between two
+  `tick()` calls, and asserts the villager still restocks at its next legitimate scheduled crossing
+  rather than silently stalling.
+
+---
+
+### 11.3 Milestone C — Documentation and diagnostics to prevent recurrence — **Implemented**
+
+- `config.yml`/`README.md`: added an explicit `IMPORTANT:` line above `restock-schedule:` stating
+  that populating `times` does nothing until `mode` is set to `"schedule"`, plus a README callout
+  advising against changing the *number* of `times` entries on a live server pre-fix (now
+  addressed by Milestone B, but the advice stays useful for admins on older builds).
+- `LobotomizeCommand.getVillagerDetails` now always shows (not gated behind `plugin.isDebugging()`,
+  since the command is itself an on-demand debug tool): "Job site nearby" via
+  `VillagerUtils.isJobSiteNearby`, and "Restocks today: n / cap" using
+  `VillagerUtils.defaultMaxRestocksPerDay()` (a new public accessor for the previously-private
+  interval-mode cap) or `RestockSchedule.size()` depending on mode. Schedule mode additionally
+  shows the raw `lastRestockPassId`, via a new `LobotomizeStorage.getLastRestockPassId(Villager)`
+  accessor.
+- `CLAUDE.md` updated: `LobotomizeCommand.java` bullet documents the new always-shown fields
+  (the `EntityTransformEvent`/PDC-bridging notes were already added when Milestone A landed).
+- Tests: `VillagerUtilsTest.defaultMaxRestocksPerDayMatchesTheImplicitIntervalModeCap` and two new
+  `RestockScheduleEndToEndTest` cases (`getLastRestockPassId` returns the PDC-written value after a
+  real restock, and defaults to `0` before any schedule-mode restock) cover the new accessors the
+  debug output reads from. The command's Brigadier output formatting itself is not
+  unit-tested — consistent with the rest of `LobotomizeCommand`, which has no existing test
+  coverage — and remains a manual `/lobotomy debug` check, per the original plan. Full suite green
+  (`./gradlew build`, 84 tests).
+
+Lower priority than A/B (no behavior bug), but directly addresses why the testing department
+couldn't self-diagnose §1/§2 and had to escalate as "unclear if this works at all."
+
+- **`src/main/resources/config.yml`**: strengthen the comment above `restock-schedule:` to state
+  up front, before the `mode` key, that populating `times` has **no effect** unless `mode` is also
+  set to `"schedule"` (the shipped default is `"interval"` with `times` pre-filled, which is the
+  most likely source of "unclear if 3 restocks... are working" per QA report §3).
+- **`README.md`**: mirror the same clarification wherever `restock-schedule` is documented for end
+  users (per the existing plan's §8, already flagged as a doc task — this is additive detail to
+  that same section, not a new doc target).
+- **`LobotomizeCommand.getVillagerDetails`** (`LobotomizeCommand.java:168-193`): add three
+  always-shown diagnostic lines (not gated behind `plugin.isDebugging()`, since this command is
+  itself an on-demand debug tool an admin runs while looking at one villager):
+  - `Job site nearby: <bool>` from `VillagerUtils.isJobSiteNearby(villager)` — directly answers "why
+    isn't this villager restocking" for the position-drift scenario noted in QA report §1 (a cured
+    villager that wandered away from its workstation as a zombie).
+  - `Restocks today: <n> / <cap>` from `villager.getRestocksToday()` and the active cap
+    (`restockSchedule.size()` in schedule mode, `2` in interval mode).
+  - In schedule mode only, alongside the existing "Next scheduled restock" line
+    (`LobotomizeCommand.java:186-193`): the raw `lastRestockPassId` PDC value, to make a future
+    passId-comparison issue immediately visible in the field instead of requiring a code review.
+- **`CLAUDE.md`**: add the new `EntityTransformEvent` handling to the `EntityListener.java` bullet
+  under "Core Files", and add a short note under "PDC Keys" that all four restock/lobotomization
+  keys are now bridged across zombify/cure transforms rather than being tracked as a caveat.
+
+#### Tests
+- No new automated tests beyond what A/B already add; this milestone is documentation plus a
+  `LobotomizeCommand` debug-output change, which is easiest to verify manually via `/lobotomy
+  debug` during the same `/runServer` pass used to close out Milestone A.
+
+---
+
+### Updated rollout order (supersedes/extends §10 for this follow-up work)
+
+1. **Milestone A — done.** `EntityListener` transform handler + `LobotomizeStorage.bridgeRestockState` +
+   `VillagerUtils` sentinel fix, with their MockBukkit tests. Still pending: the manual
+   `/runServer` zombify/cure verification pass (step 3 below) — automated coverage can't exercise
+   real infection AI or confirm assumption A5's event ordering.
+2. **Milestone B — done.** `RestockSchedule.passId` redesign + its unit/E2E tests.
+3. Manual `/runServer` verification pass covering both A (zombify/cure round trip) and B (edit
+   `times`, restart, confirm no stall) before either is considered closed — still outstanding for
+   both; automated coverage exercises the code paths but can't replace an actual restart or real
+   infection AI.
+4. **Milestone C — done.** Docs + `/lobotomy debug` diagnostic fields, landed on top of A/B's
+   final PDC semantics.
+5. Still outstanding: the manual `/runServer` verification pass (step 3) covering the real
+   zombify/cure round trip and an actual restart with an edited `times` list, and updating
+   `reports/QA_report_24082026_1.md`'s findings table once that pass confirms both fixes in-game.
