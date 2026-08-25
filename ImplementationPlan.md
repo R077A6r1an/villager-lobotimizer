@@ -379,6 +379,36 @@ potentially leaving the villager stuck at its old cap for up to a full extra in-
   on schedule rather than needing a full extra day — this is the only way to confirm assumption A5
   and the real-vanilla-NBT-persistence assumption underlying the root cause analysis.
 
+#### Manual verification result (2026-08-25, GitHub issue #2)
+
+Performed on a real test server (`mode: schedule`, `times: [08:00, 10:30, 13:00]`), a
+Master-level, cap-depleted villager was infected and cured within the same in-game day, then
+carried through to the next day's schedule. Findings:
+
+- **A5 (event ordering) confirmed fine in practice.** `lastRestockPassId` (271001) and the other
+  bridged keys survived the infection→cure round trip intact, and no double-restock occurred later
+  the same day (22:00) — `restockOpportunityAvailable` (`currentPassId > lastRestockPassId`)
+  correctly stayed `false` since no new schedule point had been crossed since the pre-infection
+  restock. Whatever the exact `EntityTransformEvent`/`EntityAddToWorldEvent` firing order is in
+  practice, it did not produce an observable exploit or state loss.
+- **Level/experience persistence confirmed** (vanilla `VillagerData`, as expected): level stayed at
+  5 (Master), experience carried forward unchanged across the cure.
+- **One correction to this section's root-cause framing:** native `restocksToday` did **not**
+  survive the round trip — it read back as `0` immediately after cure, not "stale at the old cap"
+  as the root-cause paragraph above hypothesized. This turns out not to matter: the actual gate in
+  `refreshTrades` is `restockOpportunityAvailable && shouldRestock(villager)`, an AND of the
+  plugin's own bridged `lastRestockPassId` (restrictive, correctly preserved) with vanilla's
+  `restocksToday` (reset to 0, permissive) — the bridged value is what actually blocked the
+  same-day double restock, and `restocksToday` resetting is harmless under this design. Worth
+  keeping in mind that `/lobotomy debug`'s "Restocks today: n/cap" line can read `0/n` immediately
+  after a cure even though the villager is correctly still capped for the rest of that day — a
+  cosmetic quirk, not a functional bug.
+- **Following day confirmed fully normal:** all three schedule points fired individually
+  (`08:00`/`10:30`/`13:00`), ending at `3/3` with a freshly-advanced `lastRestockPassId` (295001) —
+  no permanent stall, no stuck state.
+
+This satisfies the manual verification this milestone was blocked on; see issue #2 (closed).
+
 ---
 
 ### 11.2 Milestone B — Make `passId` comparisons stable across `restock-schedule.times` edits — **Implemented**
