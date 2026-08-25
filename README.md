@@ -149,6 +149,30 @@ restock-schedule stability fix from `reports/QA_report_24082026_1.md`.
 and (in `schedule` mode) the raw `lastRestockPassId` PDC value for a targeted villager — useful for
 diagnosing why a specific villager isn't restocking.
 
+## Troubleshooting
+
+**A villager stopped restocking/leveling after being infected and cured (zombify/cure).** Curing a
+zombie villager converts it back to a villager *at whatever position the zombie wandered to*, not
+back at its original workstation. Since restocking and leveling both require a workstation block
+within one block of the villager (in any direction), a villager cured somewhere other than where it
+was lobotomized can end up permanently stuck — its AI stays disabled, so it can't walk back on its
+own. This is diagnosable via `/lobotomy debug`'s "Job site nearby" line (now also showing the exact
+workstation material needed, e.g. `COMPOSTER` for a farmer), and the server log gets a one-time
+warning naming the villager and the missing workstation the first time this is detected.
+
+The plugin does **not** automatically teleport the villager back — that would be non-vanilla
+behavior and could move a villager away from wherever you deliberately placed it. Instead, fix it
+with either:
+- **Place a matching workstation block within one block of the villager's current position.**
+  `isJobSiteNearby` is a plain material check, not tied to a specific block — any workstation of the
+  right type nearby satisfies it, so you don't need to recover the exact original block.
+- **Physically move the villager back to its original workstation** using normal vanilla techniques
+  (water currents, pistons, minecarts/boats) — villager AI is disabled while lobotomized, but it's
+  still affected by physics like any other entity.
+
+Either fix takes effect on the villager's next periodic check (`inactive-check-interval`, a few
+seconds by default).
+
 ## Special Villager Names
 
 - Name a villager with "nobrain" to force it to always be lobotomized

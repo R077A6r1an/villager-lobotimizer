@@ -553,7 +553,7 @@ couldn't self-diagnose §1/§2 and had to escalate as "unclear if this works at 
 
 ---
 
-### 11.4 Milestone D — Recover from job-site drift after zombify/cure — **Planned**
+### 11.4 Milestone D — Diagnose and document recovery from job-site drift after zombify/cure — **Implemented**
 
 **GitHub issue:** #1 ("Zombified villagers may permanently stop restocking/leveling if they drift
 off their job site while cured").
@@ -564,96 +564,101 @@ long as the infection lasts. Curing converts it back to a `Villager` *in place*,
 zombie villager currently stands, not back at its original position. Milestone A already bridges
 all of this plugin's *data* (PDC state) across both hops, but nothing bridges the villager's
 *position*. `VillagerUtils.isJobSiteNearby`'s 3×3×3 scan is required for both restocking and
-leveling (`LobotomizeStorage.refreshTrades`, `LobotomizeStorage.java:806-811`), and a re-lobotomized
+leveling (`LobotomizeStorage.refreshTrades`, `LobotomizeStorage.java:811`), and a re-lobotomized
 villager (AI disabled) that comes back even a few blocks off its workstation has no way to path
 back on its own — so this scans `false` forever, silently stalling both, with no admin-visible
 error. Any hall that isn't fully sealed against a wandering zombie (open-air, climbable, or a
 player leading the infected zombie elsewhere before curing) can trigger this; tightly-enclosed
 halls — the common case — usually trap the zombie too, which is why testing hasn't observed it.
 
+#### Revision: why this milestone does *not* auto-teleport the villager
+
+An earlier draft of this section proposed recording a "last known good" position (PDC anchor) and
+automatically `teleportAsync`-ing a drifted villager back to it once its workstation went out of
+range. That approach was reconsidered and dropped before implementation, for reasons worth
+recording so they aren't re-litigated later:
+
+- **Teleporting is not vanilla behavior.** This plugin's whole premise (per `CLAUDE.md`) is
+  disabling AI on trapped villagers while otherwise leaving them as normal vanilla villagers — it
+  deliberately never moves them itself. An admin who has physically relocated a villager on purpose
+  (rebuilding a hall, moving it via boat/minecart to a new location, mid-decoration) would have it
+  silently snapped back to an old position the next time a check runs, which is surprising and hard
+  to explain from server logs alone.
+- **It isn't actually necessary.** `VillagerUtils.isJobSiteNearby` is a plain material scan over a
+  3×3×3 cube — it is not tied to a specific block, a POI, or the villager's original workstation.
+  Any block of the right `Material` within range satisfies it. That means an admin can *already*
+  fix a drifted villager today, with zero plugin changes, by placing a spare workstation block next
+  to wherever the villager currently is — the villager doesn't need to move at all. The only real
+  gap was **visibility**: nothing told the admin this was even possible, what material was needed,
+  or that the villager was stuck in the first place, short of noticing "Job site nearby: false" on
+  a `/lobotomy debug` they happened to run.
+
+So this milestone is diagnostics- and documentation-only: it makes the existing, fully-vanilla,
+zero-code-required recovery path (place a matching workstation nearby, or physically move the
+villager back with water/pistons/a boat — both ordinary vanilla techniques) discoverable and
+actionable, rather than adding new movement behavior. No PDC schema change, no new config key, no
+`config-version` bump.
+
 #### Resolved design decisions
 
 | # | Question | Decision |
 |---|---|---|
-| D1 | Teleport back vs. briefly re-enable AI to path home | **Teleport back to a remembered anchor position.** Re-enabling AI so the villager can path itself home (the alternative floated in issue #1) reintroduces exactly the cost this plugin exists to remove (real pathfinding in a trading hall), can fail outright if the hall geometry doesn't actually allow a path from wherever the zombie ended up, and re-opens a lobotomize/wake race with `processVillager`'s own state machine. A direct, Folia-safe teleport back to a position we already know had the workstation nearby is simpler, always succeeds or cleanly fails (no partial pathing state), and doesn't touch AI at all. |
-| D2 | Where the anchor position comes from | **Opportunistically recorded, not computed at infection time.** Whenever `refreshTrades` finds `isJobSiteNearby(villager)` true for an already-lobotomized villager, it (over)writes a small PDC anchor (world + block coords) with the villager's current position. This means a villager always has an up-to-date "last known good" position from ordinary operation — no new hook is needed at infection time, and the anchor self-updates if an admin deliberately relocates a whole trading-hall setup (the villager re-lobotomizes at the new spot, the next successful check just overwrites the anchor). |
-| D3 | Bridging the anchor across the transform | The two new PDC keys (`lastJobSiteBlock`, `lastJobSiteWorld`) join the existing four in `LobotomizeStorage.bridgeRestockState`'s copy list. Without this, the anchor recorded before infection would simply reset like everything else Milestone A already fixed, defeating the point. |
-| D4 | Recovery trigger and safety checks | Recovery is attempted only where `refreshTrades` already gates on `isJobSiteNearby` returning `false` (`LobotomizeStorage.java:806`) — i.e. only for already-lobotomized villagers on their normal check cadence, never a new code path. Before teleporting: the anchor's world must match the villager's current world (guards a hypothetical cross-dimension edge case, since PDC only stores block coords), the anchor's chunk must already be loaded (never force-loaded — consistent with `processVillager`'s existing "keep current state if chunk unloaded" rule), and the anchor location itself must still have the expected workstation block (a new `VillagerUtils.isJobSiteNearby(Material, World, int, int, int)` overload re-scans at the anchor *before* moving anything, so a stale anchor whose block was broken in the meantime is never teleported to). Any check failing falls through to today's behavior (skip this tick) rather than guessing. |
-| D5 | Teleport mechanism | `Entity#teleportAsync`, not the synchronous `teleport()` — the anchor is usually a few blocks away and almost always in the same Folia region as the villager's current position, but "almost always" isn't good enough for a Folia-safe codebase that otherwise never assumes region locality. The async result isn't awaited inline; this tick's `refreshTrades` simply treats the villager as still not-ready (matching today's "skip this tick" behavior) and lets the *next* scheduled check (≤150 ticks/7.5s later, same as `inactive-check-interval`'s existing cap) observe the villager already back in place and proceed with restock/leveling normally. Keeps the fix a pure addition with no new synchronization inside `refreshTrades` itself. |
-| D6 | Opt-out and visibility | New `restore-job-site-position: true` config key (default on) lets an admin disable the teleport-back behavior entirely if they'd rather see villagers visibly stuck than have them auto-teleport. Independently of that toggle, the first time a lobotomized villager is found off its job site with no usable anchor (never recorded one, anchor's world mismatches, anchor's chunk isn't loaded, or the anchor block is gone), log a one-time `WARNING` (not gated behind `debug: true` — this is the "warn an admin" half of issue #1's suggested fix) so the stall is visible without reading `/lobotomy debug` on every villager; tracked via an in-memory `Set<UUID>` so it doesn't repeat every check cycle, cleared once the villager recovers (by any means, including manual admin intervention). |
-| D7 | Config version | Bump `config-version` 7 → 8 specifically so `restore-job-site-position`'s default and comment actually reach already-migrated servers via `ConfigMigrator`/`CommentPreservingYamlMigrator` — repeating issue #3's mistake (a comment-only or key-only change that silently never reaches an existing `config.yml`) is not acceptable for a new *behavioral* toggle, where a server admin who never sees the key has no way to know the opt-out exists. |
+| D1 | Automatic repositioning vs. documentation-only | **Documentation-only; no automatic repositioning of any kind.** See the revision note above. The fix is telling the admin what's wrong and how to resolve it themselves, in-world, exactly as they would build any other villager containment. |
+| D2 | How an admin discovers the problem | Two channels, both already-existing mechanisms extended rather than new infrastructure: (1) `/lobotomy debug`'s existing "Job site nearby: false" line gets a new "Needed workstation: `<MATERIAL>`" line right under it; (2) `LobotomizeStorage.refreshTrades` logs a one-time `WARNING` (not gated behind `debug: true`, since a silently stalled villager is otherwise invisible without running `/lobotomy debug` against that exact villager) the first time a lobotomized villager is found without its job site, naming the villager, its profession, the missing workstation material, and its current coordinates. |
+| D3 | Warning spam control | Tracked via an in-memory `Set<UUID> jobSiteMissingWarned` on `LobotomizeStorage` (mirrors the existing `activeVillagers`/`inactiveVillagers` `Set` pattern already used for tracking, not persisted — a restart re-arms the warning if the villager is still stuck, which is desired). Cleared the moment `isJobSiteNearby` next returns `true` for that villager, so a later, separate drift episode warns again rather than staying permanently silenced. |
+| D4 | How an admin actually fixes it | Two vanilla-legal options, both documented in README.md's new Troubleshooting section: (a) place any block of the needed workstation material within one block of the villager's *current* position — doesn't need to be the original block, since the check is a pure material scan; or (b) physically move the villager back to its original workstation using ordinary vanilla techniques (water currents, pistons, a boat/minecart) — a lobotomized villager has `NoAI` but is still a normal physics-affected entity. Either fix takes effect on the villager's very next periodic check, no plugin change or command needed. |
+| D5 | Scope vs. the original "warn an admin" suggestion | Issue #1's own suggested fast-follow was "detecting job-site loss and either warning an admin or allowing the villager to briefly re-enable AI to path home." This milestone implements the "warn an admin" half only, and explicitly rejects the "re-enable AI to path home" half (D1) since it reintroduces the real pathfinding cost this plugin removes and can fail outright depending on hall geometry. |
 
 #### Code changes
 
-**`src/main/java/dev/mja00/villagerLobotomizer/utils/VillagerUtils.java`**
-- Extract the existing 3×3×3 scan out of `isJobSiteNearby(Villager)` into a new
-  `isJobSiteNearby(Material jobSite, World world, int baseX, int baseY, int baseZ)` overload; the
-  existing method becomes a two-line wrapper that looks up the profession's station and the
-  villager's block position and delegates. No behavior change for existing callers.
-
 **`src/main/java/dev/mja00/villagerLobotomizer/LobotomizeStorage.java`**
-- Add `lastJobSiteBlockKey` (`PersistentDataType.INTEGER_ARRAY`, `[x, y, z]`) and
-  `lastJobSiteWorldKey` (`PersistentDataType.STRING`, `world.getUID().toString()`) alongside the
-  existing four `NamespacedKey` fields.
-- Add both to `bridgeRestockState`'s `copyIfPresent` calls.
-- Add a `restoreJobSitePosition` boolean field read from config (default `true`), and a
-  `Set<UUID> jobSiteDriftWarned = ConcurrentHashMap.newKeySet()` field for the one-time warning.
-- In `refreshTrades` (`LobotomizeStorage.java:806-811`), replace the flat
-  `if (!VillagerUtils.isJobSiteNearby(villager)) { ...; return; }` with a call to a new private
-  `recoverJobSiteAnchor(Villager villager)` returning the now-current `isJobSiteNearby` result:
-  - If `isJobSiteNearby(villager)` is already true: remove `villager.getUniqueId()` from
-    `jobSiteDriftWarned` if present, write/refresh the anchor PDC to the villager's current
-    position (skip the write if unchanged, matching `rescheduleVillagerTask`'s "only touch state
-    that actually changed" pattern), and return `true`.
-  - Otherwise, if `restoreJobSitePosition` is `false`: return `false` (today's behavior, unchanged).
-  - Otherwise, read the anchor PDC; if absent, world-mismatched, chunk-unloaded, or the anchor
-    block itself no longer has the workstation (via the new location-based
-    `isJobSiteNearby` overload) — log the one-time warning (if not already warned for this UUID)
-    and return `false`.
-  - Otherwise, fire `villager.teleportAsync(anchorLocation)`, log at debug level, and return
-    `false` for this tick (per D5).
-- `refreshTrades` calls this once (in place of the old inline check) and proceeds exactly as before
-  based on its boolean result — no other control flow in `refreshTrades` changes.
+- Add `private final Set<UUID> jobSiteMissingWarned = Collections.newSetFromMap(new ConcurrentHashMap<>());`
+  alongside the existing tracking sets.
+- In `refreshTrades`'s existing `if (!VillagerUtils.isJobSiteNearby(villager))` branch
+  (`LobotomizeStorage.java:811`), call a new private `warnJobSiteMissingOnce(villager)` before the
+  existing debug-gated skip log. On the success path just below (job site confirmed present),
+  `this.jobSiteMissingWarned.remove(villager.getUniqueId())` clears any prior warning.
+- New `warnJobSiteMissingOnce`: no-ops (via `Set.add`'s `false` return) if this villager is already
+  in `jobSiteMissingWarned`; otherwise logs the `WARNING` described in D2 and adds the UUID.
+- No changes to `bridgeRestockState`, no new `PersistentDataType`s, no new config reads.
 
 **`src/main/java/dev/mja00/villagerLobotomizer/LobotomizeCommand.java`**
-- `getVillagerDetails`: add a "Job site anchor: `x, y, z` (`world`) / not recorded" line alongside
-  the existing "Job site nearby" line, reading the same two PDC keys — makes a stuck villager's
-  recorded home position (or the fact that none exists yet) visible without a debug-log dive.
+- `getVillagerDetails`: when `jobSiteNearby` is `false`, append a "Needed workstation: `<MATERIAL>`"
+  line reading `VillagerUtils.PROFESSION_TO_STATION.get(villager.getProfession())`, skipped for
+  job-siteless professions (`NITWIT`/`NONE`, whose station is `Material.AIR`) since there's nothing
+  meaningful to suggest placing.
 
-**`src/main/resources/config.yml`**
-- Bump `config-version` to `8`.
-- Add, near `persist-lobotomized-state`:
-  ```yaml
-  #Whether a lobotomized villager that ends up off its job site (most commonly after being
-  #infected and cured while lobotomized - see the zombify/cure notes below) is automatically
-  #teleported back to the last position it was confirmed to have its workstation nearby, rather
-  #than silently stalling restocks/level-ups until an admin intervenes.
-  restore-job-site-position: true
-  ```
+**`README.md`**
+- New "Troubleshooting" section (after "Restock Scheduling", before "Special Villager Names")
+  explaining the zombify/cure job-site-drift scenario, why the plugin doesn't auto-teleport, and
+  both vanilla-legal fixes (place a matching block nearby, or physically relocate the villager).
 
 **`CLAUDE.md`**
-- Note the two new PDC keys and their bridging under "PDC Keys", and the `recoverJobSiteAnchor`
-  behavior under `LobotomizeStorage.java`'s bullet.
+- `LobotomizeStorage.java` bullet: note `warnJobSiteMissingOnce`/`jobSiteMissingWarned` and the
+  explicit no-auto-teleport decision.
+- `LobotomizeCommand.java` bullet: note the new "Needed workstation" debug line.
 
 #### Tests
-- **`VillagerUtilsTest` (extend)**: cases for the new `isJobSiteNearby(Material, World, int, int,
-  int)` overload directly (workstation present/absent at given coords), independent of a live
-  villager's own location.
-- **MockBukkit, new — extend `EntityTransformBridgeTest.java`**: assert the two new anchor keys
-  bridge across both the infection and cure hops alongside the existing four.
-- **MockBukkit, new — `JobSiteRecoveryTest.java`**: place a villager next to a workstation, run a
-  check to let the anchor get recorded, move the villager (or its mock equivalent) away from the
-  workstation without updating the anchor, run another check, and assert the villager ends up
-  teleported back and eligible to restock/level again on the following check. Also cover the
-  negative cases from D4 (world mismatch, unloaded destination chunk, anchor block removed) each
-  falling through to "still not recovered" rather than throwing or teleporting somewhere wrong.
-- **Manual `/runServer` verification (required before closing issue #1):** reproduce the exact
+- **MockBukkit, new — `JobSiteDriftWarningTest.java`**: a lobotomized (`"nobrain"`-named) farmer
+  with no `COMPOSTER` in range warns exactly once across several check-interval ticks (not once per
+  tick); placing the missing block clears the warning state, and removing it again afterward
+  produces a second, independent warning — proving both the spam guard and the re-arm-after-recovery
+  behavior from D3. A third case asserts a lobotomized `NITWIT` (no workstation by design, so
+  `isJobSiteNearby` is permanently `false`) never warns at all — caught during implementation as a
+  real bug in an early draft of `warnJobSiteMissingOnce` that would have logged a nonsensical
+  warning for every job-siteless profession on its very first check.
+- **`/lobotomy debug`'s new "Needed workstation" line**: not covered by an automated test (no
+  existing `LobotomizeCommandTest` harness for brigadier command dispatch in this suite) — verify
+  manually, same as Milestone C's own debug-field additions.
+- **Manual `/runServer` verification (recommended before closing issue #1):** reproduce the
   scenario from the issue — lobotomize a villager at its workstation, let it get infected, walk or
   lead the resulting zombie a few blocks off its job site pad (in an open-air setup, since a fully
-  sealed hall traps the zombie too), cure it there, and confirm via `/lobotomy debug` that it
-  self-heals (teleports back, "Job site nearby" flips to `true`, restocking/leveling resumes)
-  within one check cycle rather than staying permanently stuck. MockBukkit cannot simulate the
-  actual zombie wandering off, so this is the only way to confirm the fix end-to-end.
+  sealed hall traps the zombie too), cure it there, and confirm the villager is now visibly stuck
+  (`/lobotomy debug` shows "Job site nearby: false" + "Needed workstation"), the server log shows
+  exactly one warning for it, and placing a spare workstation block nearby (without moving the
+  villager) resumes restocking/leveling on the next check. Unlike Milestone A, this isn't gated on
+  an unverifiable event-ordering assumption — the fix here is inherently manual/admin-driven, so
+  this pass is about confirming discoverability, not an automatic code path.
 
 ---
 
@@ -671,11 +676,13 @@ halls — the common case — usually trap the zombie too, which is why testing 
    anything MockBukkit can't already exercise).
 3. **Milestone C — done.** Docs + `/lobotomy debug` diagnostic fields, landed on top of A/B's
    final PDC semantics.
-4. **Milestone D — planned (this section, §11.4).** Job-site-drift recovery for issue #1: anchor
-   PDC keys + `bridgeRestockState` extension, `VillagerUtils.isJobSiteNearby` location-based
-   overload, `refreshTrades`'s `recoverJobSiteAnchor` teleport-back logic, `restore-job-site-position`
-   config toggle (config-version 7 → 8), and the new debug/warning visibility. Land the unit +
-   MockBukkit tests first, then the manual `/runServer` reproduction pass described in §11.4's
-   Tests subsection before closing issue #1 — MockBukkit can't simulate a zombie actually wandering
-   off, so, as with Milestone A, that pass is what actually closes the issue rather than the code
-   landing.
+4. **Milestone D — done.** Job-site-drift diagnostics for issue #1: `/lobotomy debug`'s "Needed
+   workstation" line, `refreshTrades`'s one-time `warnJobSiteMissingOnce` warning (with
+   `JobSiteDriftWarningTest` MockBukkit coverage), and README.md's Troubleshooting section
+   documenting the two vanilla-legal fixes (place a matching workstation nearby, or physically
+   relocate the villager). No automatic teleport/reposition — see §11.4's revision note for why
+   that earlier draft was dropped. A manual `/runServer` reproduction pass (walk an infected
+   zombie off its pad, cure it, confirm the warning/debug line fire and that placing a spare
+   workstation nearby resumes restocking) is recommended before closing issue #1, but — unlike
+   Milestone A — isn't gated on any unverifiable assumption, since the fix itself is inherently
+   admin-driven rather than an automatic code path.

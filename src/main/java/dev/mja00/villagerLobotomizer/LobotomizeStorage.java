@@ -61,6 +61,11 @@ public class LobotomizeStorage {
     private final Map<Chunk, Long> changedChunks = new ConcurrentHashMap<>();
     private final Map<UUID, ScheduledTask> villagerTasks = new ConcurrentHashMap<>();
     private final Map<UUID, Long> villagerTaskIntervals = new ConcurrentHashMap<>();
+    // Tracks villagers already warned about a missing job site (most commonly a villager that
+    // drifted off its workstation across a zombify/cure round trip - see issue #1), so the warning
+    // logs once per drift episode rather than every check-interval tick. Cleared once the villager's
+    // job site is found again, so a later, separate drift re-warns.
+    private final Set<UUID> jobSiteMissingWarned = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Set<String> exemptNames;
     private final long checkInterval;
     private final long inactiveCheckInterval;
@@ -804,11 +809,13 @@ public class LobotomizeStorage {
         }
 
         if (!VillagerUtils.isJobSiteNearby(villager)) {
+            warnJobSiteMissingOnce(villager);
             if (this.plugin.isDebugging()) {
                 this.logger.info("[Debug] Skipping trade refresh for " + villager.getUniqueId() + " - no job site nearby");
             }
             return;
         }
+        this.jobSiteMissingWarned.remove(villager.getUniqueId());
 
         if (this.plugin.isDebugging()) {
             if (scheduleMode) {
@@ -881,6 +888,42 @@ public class LobotomizeStorage {
         } catch (IllegalArgumentException e) {
             this.plugin.getLogger().warning("Failed to level up villager " + villager.getUniqueId() + ": " + e.getMessage());
         }
+    }
+
+    /**
+     * Logs a one-time, admin-visible warning the first time a lobotomized villager is found without
+     * its job site nearby - most commonly a villager that drifted off its workstation while it was a
+     * (non-lobotomized, wandering) zombie during a zombify/cure round trip (issue #1). Deliberately
+     * not gated behind {@code debug: true}: a silently stalled villager is otherwise only
+     * discoverable by running {@code /lobotomy debug} against it specifically.
+     * <p>
+     * No automatic repositioning is attempted here on purpose - teleporting a lobotomized villager
+     * back to some remembered position isn't vanilla behavior and could yank it away from wherever a
+     * player deliberately moved it. {@code VillagerUtils.isJobSiteNearby} is a plain material scan
+     * within a 3x3x3 cube, not tied to a specific block or POI, so the admin-facing fix is simply
+     * placing any matching workstation block within one block of the villager's *current* position
+     * (or physically relocating the villager itself, e.g. with water/pistons) - see README.md's
+     * Troubleshooting section.
+     * <p>
+     * No-ops for professions with no workstation at all ({@code NITWIT}/{@code NONE}), since
+     * {@code isJobSiteNearby} is always {@code false} for those by design - that's an expected,
+     * permanent state, not a drift to warn about.
+     */
+    private void warnJobSiteMissingOnce(@NotNull Villager villager) {
+        Material neededStation = VillagerUtils.PROFESSION_TO_STATION.get(villager.getProfession());
+        if (neededStation == null || neededStation == Material.AIR) {
+            return;
+        }
+        if (!this.jobSiteMissingWarned.add(villager.getUniqueId())) {
+            return; // already warned for this drift episode
+        }
+        Location loc = villager.getLocation();
+        this.logger.warning("Lobotomized villager " + villager.getUniqueId() + " (" + villager.getProfession() + ") "
+                + "has no job site (" + neededStation + ") within range at " + loc.getWorld().getName() + " "
+                + loc.getBlockX() + "," + loc.getBlockY() + "," + loc.getBlockZ() + " - restocking and leveling are "
+                + "paused until a matching workstation is placed nearby. This commonly happens after a "
+                + "zombify/cure round trip moved the villager off its original workstation; see /lobotomy debug "
+                + "and README.md's Troubleshooting section.");
     }
 
     /**

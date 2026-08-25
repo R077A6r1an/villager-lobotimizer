@@ -7,6 +7,7 @@ import java.util.concurrent.CompletableFuture;
 import dev.mja00.villagerLobotomizer.policy.RestockSchedule;
 import dev.mja00.villagerLobotomizer.utils.VillagerUtils;
 import org.bukkit.Bukkit;
+import org.bukkit.Material;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -192,6 +193,16 @@ public class LobotomizeCommand {
         boolean jobSiteNearby = VillagerUtils.isJobSiteNearby(villager);
         message = message.append(Component.text("\nJob site nearby: "))
                 .append(Component.text(jobSiteNearby).color(jobSiteNearby ? NamedTextColor.GREEN : NamedTextColor.RED));
+        if (!jobSiteNearby) {
+            // isJobSiteNearby is a plain material scan (not tied to a specific block or POI), so the
+            // fix is placing any matching workstation within 1 block of the villager's *current*
+            // position - no need to restore its original one. See README.md's Troubleshooting section.
+            Material neededStation = VillagerUtils.PROFESSION_TO_STATION.get(villager.getProfession());
+            if (neededStation != null && neededStation != Material.AIR) {
+                message = message.append(Component.text("\nNeeded workstation: "))
+                        .append(Component.text(neededStation.name()).color(NamedTextColor.YELLOW));
+            }
+        }
 
         int restocksToday = villager.getRestocksToday();
         int restockCap = this.plugin.getStorage().isScheduleModeActive()
