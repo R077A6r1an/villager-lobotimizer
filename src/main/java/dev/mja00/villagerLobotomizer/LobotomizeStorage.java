@@ -111,8 +111,9 @@ public class LobotomizeStorage {
         this.restockInterval = validateInterval("restock-interval", plugin.getConfig().getLong("restock-interval"), 0L, 540000L);
         this.restockRandomRange = validateInterval("restock-random-range", plugin.getConfig().getLong("restock-random-range"), 0L, 0L);
 
+        List<String> configuredRestockTimes = plugin.getConfig().getStringList("restock-schedule.times");
         boolean scheduleModeConfigured = "schedule".equalsIgnoreCase(plugin.getConfig().getString("restock-schedule.mode", "interval"));
-        this.restockSchedule = RestockSchedule.parse(plugin.getConfig().getStringList("restock-schedule.times"));
+        this.restockSchedule = RestockSchedule.parse(configuredRestockTimes);
         if (scheduleModeConfigured) {
             for (String warning : this.restockSchedule.warnings()) {
                 this.logger.warning("[restock-schedule] " + warning);
@@ -121,6 +122,17 @@ public class LobotomizeStorage {
                 this.logger.warning("restock-schedule.mode is \"schedule\" but no valid restock-schedule.times "
                         + "entries were configured; falling back to interval-mode restocking.");
             }
+        } else if (!configuredRestockTimes.isEmpty()) {
+            // A runtime reminder rather than a config.yml comment edit, since config.yml's own comment
+            // clarifying this exact point (added in Milestone C) never reaches a server that already
+            // migrated to config-version 7 before that change landed - CommentPreservingYamlMigrator
+            // always prefers an admin's existing comment for a key/section already present in their
+            // file, so even a config-version bump wouldn't deliver updated comment text here (see
+            // ImplementationPlan.md §11.5 / issue #3). Logging this at runtime instead reaches every
+            // server unconditionally on every enable/reload, regardless of migration history.
+            this.logger.info("[restock-schedule] restock-schedule.times has entries configured, but "
+                    + "restock-schedule.mode is \"interval\" - populating times has no effect until mode is "
+                    + "set to \"schedule\". See README.md's Restock Scheduling section.");
         }
         this.scheduleModeActive = scheduleModeConfigured && !this.restockSchedule.isEmpty();
         this.onlyProfessions = plugin.getConfig().getBoolean("only-lobotomize-villagers-with-professions");

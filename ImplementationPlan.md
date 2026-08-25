@@ -662,6 +662,69 @@ actionable, rather than adding new movement behavior. No PDC schema change, no n
 
 ---
 
+### 11.5 Milestone E — Deliver the restock-schedule mode/times clarification at runtime — **Implemented**
+
+**GitHub issue:** #3 ("restock-schedule config clarification comment never reaches already-migrated
+(config-version 7) servers").
+
+**Root cause:** Milestone C added an `IMPORTANT:` comment above `restock-schedule:` in the shipped
+`config.yml` clarifying that populating `times` does nothing unless `mode` is explicitly set to
+`"schedule"`. That comment can only ever reach a server through `ConfigMigrator`'s migration path,
+and two independent things block it from reaching any server that already has a config-version-7
+`config.yml` (i.e. every server that could have hit the original "unclear if 3 restocks are
+working" confusion in the first place):
+
+1. `ConfigMigrator.migrate()` early-returns with zero merge work whenever
+   `existingConfig.getInt("config-version", 0) == CURRENT_CONFIG_VERSION` — an already-current
+   config file is left completely untouched on plugin update.
+2. **Even a forced re-migration wouldn't have fixed it.** `CommentPreservingYamlMigrator.mergeRecursive`
+   (the `Map`-vs-`Map` branch used for the `restock-schedule:` section) does
+   `comment = existingComments.get(keyPath); if (comment == null) { comment = defaultComments.get(keyPath); }`
+   — it only ever falls back to the new default comment when the admin's file has *no* comment at
+   that key/section at all. Since `restock-schedule:` has had *some* comment since it was
+   introduced (config-version 6→7), every already-migrated server's old comment text wins
+   regardless. This means the `config-version` bump floated as an option in the issue itself would
+   **not** actually have delivered the updated comment — confirmed by tracing the merge logic rather
+   than assumed, since silently shipping a version bump that doesn't fix anything would be worse
+   than not bumping at all.
+
+#### Resolved design decisions
+
+| # | Question | Decision |
+|---|---|---|
+| E1 | Config-version bump | **Rejected**, for the reason traced above — bumping `CURRENT_CONFIG_VERSION` triggers a merge pass, but `CommentPreservingYamlMigrator` would still prefer the admin's pre-existing `restock-schedule:` comment over the new one, so the delivery gap would persist even after a bump. Forcing an overwrite of the admin's comment for this one key was also considered and rejected — it would require carving out a special case that breaks the general "never clobber an admin's own comment edits" contract `CommentPreservingYamlMigratorTest` already locks in, for a fix that's really about reaching *new* information, not preserving/discarding old text. |
+| E2 | CHANGELOG/release-notes callout | **Rejected as the primary fix**, though not incompatible with one existing independently. This project has no `CHANGELOG.md` today, and introducing one is a bigger structural change than this issue calls for; more fundamentally, a changelog entry still depends on an admin actually reading it, whereas the chosen fix (E3) reaches every affected server unconditionally with zero admin action required. |
+| E3 | Runtime log reminder | **Chosen fix.** `LobotomizeStorage`'s constructor (already the place `restock-schedule` config is read and validated) now logs a one-time `INFO` line whenever `restock-schedule.times` has entries but `mode` is not `"schedule"` — the exact confusing state the original QA finding was about. This is a runtime check against the *live parsed config*, not a static file comparison, so it is completely unaffected by config-version/migration history: a server that migrated years ago sees it exactly the same as a fresh install. It fires once per enable/reload (matching the existing `restockSchedule.warnings()` logging pattern immediately above it in the constructor), at `INFO` rather than `WARNING` since nothing is actually broken — this is a "did you mean to..." nudge, not an error. |
+| E4 | Detecting "did the admin mean to enable it" vs. spam | Deliberately **not** attempted. The shipped default `config.yml` itself ships `mode: interval` with `restock-schedule.times` pre-populated as an example, so *every* untouched fresh install matches the trigger condition (`times` non-empty, `mode` != `"schedule"`) — there is no reliable way to distinguish "admin edited `times` believing it was active" from "admin never touched this section" using only the parsed config. Rather than build a fragile heuristic (e.g. diffing against the shipped default list, which breaks the moment that example list changes in a later version), the reminder is accepted as always-relevant informational output, consistent with this plugin's existing precedent of unconditional startup `INFO` lines (update-checker status, Sentry status) that most admins will never need to act on. |
+| E5 | README.md | No change needed to the substance (QA already confirmed it's current and accurate and not subject to the migration-comment problem since it's never merged into anyone's config) — added one cross-reference sentence noting the new runtime reminder exists, so a reader who spots the log line and greps for it in docs finds an explanation. |
+
+#### Code changes
+
+**`src/main/java/dev/mja00/villagerLobotomizer/LobotomizeStorage.java`**
+- Constructor: capture the raw `plugin.getConfig().getStringList("restock-schedule.times")` result
+  in a local (`configuredRestockTimes`) before parsing it into `this.restockSchedule`, so the
+  reminder can check the *raw* configured list (independent of whether individual entries parse as
+  valid) rather than the post-validation `RestockSchedule`.
+- Add an `else if (!configuredRestockTimes.isEmpty())` branch alongside the existing
+  `if (scheduleModeConfigured) { ... }` block, logging the one-time `INFO` reminder described in E3.
+
+**`README.md`**
+- One added sentence in the "Restock Scheduling" section cross-referencing the new runtime
+  reminder and this plan section.
+
+**`CLAUDE.md`**
+- New bullet under `LobotomizeStorage.java`'s "Core Files" entry documenting the reminder and why
+  it's a runtime check rather than a config comment.
+
+#### Tests
+- **`LobotomizeStorageScheduleTest` (extend)**: three new cases, using a `java.util.logging.Handler`
+  attached to `plugin.getLogger()` to capture emitted records (the same technique
+  `JobSiteDriftWarningTest` introduced in Milestone D) — the reminder logs when `times` is populated
+  under `mode: interval` (the exact confusing state), does not log when `times` is empty, and does
+  not log when `mode: schedule` is already active (since `times` is genuinely in effect there).
+
+---
+
 ### Updated rollout order (supersedes/extends §10 for this follow-up work)
 
 1. **Milestone A — done, manually verified.** `EntityListener` transform handler +
@@ -686,3 +749,10 @@ actionable, rather than adding new movement behavior. No PDC schema change, no n
    workstation nearby resumes restocking) is recommended before closing issue #1, but — unlike
    Milestone A — isn't gated on any unverifiable assumption, since the fix itself is inherently
    admin-driven rather than an automatic code path.
+5. **Milestone E — done.** Runtime reminder for issue #3: `LobotomizeStorage`'s constructor logs a
+   one-time `INFO` line whenever `restock-schedule.times` has entries but `mode` isn't
+   `"schedule"`, with `LobotomizeStorageScheduleTest` coverage. Explicitly does not rely on a
+   `config-version` bump — traced through `CommentPreservingYamlMigrator` and confirmed a bump
+   would not have actually delivered the updated comment to already-migrated servers (see §11.5's
+   root-cause section), so no config schema change was made. No manual `/runServer` pass needed;
+   this is a plain constructor-logic change already fully covered by MockBukkit.

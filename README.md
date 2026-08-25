@@ -140,10 +140,13 @@ Villager trades can be refreshed in one of two modes, set via `restock-schedule.
 **`restock-schedule.mode` must be explicitly set to `"schedule"` to enable the new behavior.** The
 shipped default `config.yml` ships `restock-schedule.times` pre-populated with an example, but
 `mode` still defaults to `"interval"` — populating `times` alone has no effect until `mode` is
-changed. After switching modes or editing `times`, apply the change with `/lobotomy reload` (or a
-restart); avoid changing the *number* of entries in `times` on a live server with villagers that
-have already restocked under the previous list unless you're running a version that includes the
-restock-schedule stability fix from `reports/QA_report_24082026_1.md`.
+changed. If `restock-schedule.times` has entries but `mode` is still `"interval"`, the server log
+gets an informational reminder of exactly this on every enable/reload (config.yml's own comment
+can't reliably reach an already-migrated server, so this check runs at runtime instead — see
+`ImplementationPlan.md` §11.5). After switching modes or editing `times`, apply the change with
+`/lobotomy reload` (or a restart); avoid changing the *number* of entries in `times` on a live
+server with villagers that have already restocked under the previous list unless you're running a
+version that includes the restock-schedule stability fix from `reports/QA_report_24082026_1.md`.
 
 `/lobotomy debug` shows the next scheduled restock time, plus job-site-nearby, restocks-today/cap,
 and (in `schedule` mode) the raw `lastRestockPassId` PDC value for a targeted villager — useful for
