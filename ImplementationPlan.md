@@ -774,6 +774,67 @@ suspected bug.
 
 ---
 
+### 11.7 Milestone G — Refresh an open trade window on restock — **Implemented, pending manual verification**
+
+**GitHub issue:** #6 ("Restocked trades don't appear in an already-open trade GUI until reopened").
+
+**Confirmed root cause (via `org.bukkit.inventory.Merchant`'s own Javadoc, checked directly rather
+than assumed):** `Merchant#setRecipes` states outright that it *"will not change the selected
+trades of players currently trading with this merchant."* `LobotomizeStorage.refreshTrades` calls
+exactly this method to apply a restock, with no further action — so a restock that fires while a
+player is mid-trade is applied server-side but never pushed to that player's already-open trade
+screen, matching the reported symptom exactly. This is a general Bukkit/Paper `Merchant` API
+characteristic (answers the issue's open question 1: not specific to lobotomization, schedule
+mode, or this plugin), and since `refreshTrades` is one shared method for both restock-gating
+modes, it affects `interval` mode identically (answers open question 3) — the owner's request to
+prioritize `schedule` mode is satisfied automatically by fixing the shared code path rather than
+needing two separate fixes.
+
+Also checked directly against `Merchant`'s own API surface (answers open question 2): it exposes
+`isTrading()` and `getTrader()` (the player currently trading, or `null`), but no method to push an
+updated offer list to an inventory that's already open. The closest supported mechanism is
+re-opening the merchant for that player via `HumanEntity#openMerchant(Merchant, boolean force)`
+(`force=true`, since Bukkit refuses to open a merchant for a player already mid-trade without it) —
+deprecated since Paper 1.21.4 in favor of `MenuType.MERCHANT` + `openInventory(InventoryView)`, but
+not removed, and the replacement's public API doesn't expose a way to bind an existing `Merchant`
+instance to a fresh view, so the deprecated overload is what's actually usable here.
+
+#### Resolved design decisions
+
+| # | Question | Decision |
+|---|---|---|
+| G1 | Fix mechanism | After every successful restock in `refreshTrades` (right after `setRecipes`/`updateDemand`), call new method `refreshOpenTradeWindow(villager)`: if `villager.isTrading()`, fetch `villager.getTrader()` and re-open the merchant for them (`force=true`), so the client re-requests the current (now-updated) offers. No config toggle — this is a pure bug fix with no legitimate reason an admin would want the stale-trades behavior, unlike Milestone D's teleport decision. |
+| G2 | Thread safety | The trader is a different entity from the villager `refreshTrades` is already running for (via the villager's own `EntityScheduler` task); per this codebase's Folia-safety rules, mutating a different entity requires dispatching through *that entity's own* scheduler rather than assuming same-region locality, even though a trading player is almost always right next to the villager. Dispatched via `trader.getScheduler().run(this.plugin, SentryTaskWrapper.wrap(...), null)`, matching the existing pattern used elsewhere in this class (e.g. `wakeVillager` dispatch). |
+| G3 | Re-check before acting | Since the scheduler dispatch is asynchronous relative to the restock, the scheduled task re-checks `trader.isValid() && trader.equals(villager.getTrader())` before calling `openMerchant` — the trade may have already ended (player closed the window, walked away, etc.) by the time the task actually runs. |
+| G4 | Verification | **MockBukkit cannot verify the fix itself** — its `HumanEntity#openMerchant` is an unimplemented stub, and even a real implementation couldn't confirm client-visible rendering from a headless test. `RefreshOpenTradeWindowTest` only proves the dispatch logic runs without throwing (no-op when nobody's trading; a scheduled reopen when somebody is). Whether the trade window actually visibly refreshes for a real client — and whether doing so causes any visible side effect (e.g. the window flickering closed/reopened, the selected trade slot resetting, the villager's ambient trade sound replaying) — requires a manual `/runServer` pass: have a player open a lobotomized villager's trade screen, trigger a restock (wait for the schedule/interval to fire, or use `/lobotomy debug` timing to predict it), and confirm the new trades appear without closing the window. |
+
+#### Code changes
+
+**`src/main/java/dev/mja00/villagerLobotomizer/LobotomizeStorage.java`**
+- Add `import org.bukkit.entity.HumanEntity;`.
+- New package-visible method `refreshOpenTradeWindow(@NotNull Villager villager)` (package-visible
+  rather than `private` specifically so `RefreshOpenTradeWindowTest` can exercise it directly — see
+  G4): early-returns if `!villager.isTrading()` or `getTrader()` is `null`; otherwise dispatches the
+  re-check-and-`openMerchant(villager, true)` call through the trader's own `EntityScheduler`.
+- Call it once, right after `villager.updateDemand()` in the successful-restock branch of
+  `refreshTrades` — no other control flow in `refreshTrades` changes.
+
+#### Tests
+- **MockBukkit, new — `RefreshOpenTradeWindowTest.java`**: `doesNothingWhenNobodyIsTrading` (no
+  trader set, method returns without throwing) and
+  `schedulesAMerchantReopenWithoutThrowingWhenSomeoneIsTrading` (a `PlayerMock` set as the
+  villager's trader via `VillagerMock#setTrader`, dispatch doesn't throw — it never reaches
+  MockBukkit's unimplemented `openMerchant` stub since that only runs inside the scheduled task).
+- Full suite green (`./gradlew test`, 93 tests including these two). All existing restock tests
+  (`RestockScheduleEndToEndTest`, `JobSiteDriftWarningTest`, etc.) continued passing unchanged,
+  confirming `refreshOpenTradeWindow`'s no-trader no-op path doesn't disturb any existing restock
+  flow.
+- **Manual `/runServer` verification (required before closing issue #6):** per G4 — this is the
+  only way to confirm the actual fix (a visibly-refreshing trade window), and to check for any
+  distracting visual side effect from re-opening the merchant mid-trade.
+
+---
+
 ### Updated rollout order (supersedes/extends §10 for this follow-up work)
 
 1. **Milestone A — done, manually verified.** `EntityListener` transform handler +
@@ -810,3 +871,12 @@ suspected bug.
    `RestockScheduleEndToEndTest` drives three separate, individually-triggered restocks across one
    in-game day, rather than one combined catch-up jump. Purely additive test coverage, no
    production code changed, no manual verification needed.
+7. **Milestone G — code done, manual verification pending.** Fix for issue #6:
+   `LobotomizeStorage.refreshTrades` now calls a new `refreshOpenTradeWindow` after every restock,
+   re-opening the merchant for whoever is currently trading with the villager (confirmed root
+   cause: `Merchant#setRecipes`'s own Javadoc documents it doesn't update an already-open trade
+   window). `RefreshOpenTradeWindowTest` covers the dispatch logic, but — unlike Milestones D/E/F —
+   this one genuinely can't be confirmed by MockBukkit at all (no packet/client rendering
+   simulation), so a manual `/runServer` pass (open a trade window, trigger a restock, confirm it
+   updates live with no distracting visual side effect) is required before closing issue #6, not
+   just recommended.

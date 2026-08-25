@@ -24,6 +24,7 @@ import org.bukkit.SoundCategory;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Vehicle;
 import org.bukkit.entity.Villager;
@@ -856,6 +857,7 @@ public class LobotomizeStorage {
             villager.setRestocksToday(villager.getRestocksToday() + 1);
             // Tell the villager to update pricing of their trades
             villager.updateDemand();
+            refreshOpenTradeWindow(villager);
 
             if (this.plugin.isDebugging()) {
                 this.logger.info("[Debug] Villager " + villager.getUniqueId() + " restocked! restocksToday now: " + villager.getRestocksToday());
@@ -900,6 +902,41 @@ public class LobotomizeStorage {
         } catch (IllegalArgumentException e) {
             this.plugin.getLogger().warning("Failed to level up villager " + villager.getUniqueId() + ": " + e.getMessage());
         }
+    }
+
+    /**
+     * Re-opens the villager's trade window for whoever is currently trading with it, so a restock
+     * that fires mid-trade is visible immediately instead of only after the player closes and
+     * reopens the window (issue #6).
+     * <p>
+     * {@link org.bukkit.inventory.Merchant#setRecipes} explicitly documents that it "will not
+     * change the selected trades of players currently trading with this merchant" - Bukkit/Paper
+     * never re-sends the merchant-offers packet just because the underlying recipe list changed
+     * server-side, unlike vanilla's own restock path (which does refresh live for the trading
+     * player). Re-opening the merchant with {@code force=true} (exactly one player can already be
+     * trading with a villager, so the normal "already trading" guard must be bypassed) makes the
+     * client re-request the current offers, which now reflect the restock just applied above.
+     * <p>
+     * Package-visible (rather than private) so {@code RefreshOpenTradeWindowTest} can exercise the
+     * dispatch logic directly; MockBukkit's {@code openMerchant} is an unimplemented stub, so what
+     * can actually be tested is that the right thing is scheduled without throwing, not the
+     * client-visible refresh itself - that needs a manual {@code /runServer} pass (see
+     * {@code ImplementationPlan.md} §11.7).
+     */
+    void refreshOpenTradeWindow(@NotNull Villager villager) {
+        if (!villager.isTrading()) {
+            return;
+        }
+        HumanEntity trader = villager.getTrader();
+        if (trader == null) {
+            return;
+        }
+        trader.getScheduler().run(this.plugin, SentryTaskWrapper.wrap((task) -> {
+            // Re-check after the scheduler hop: the trade may have ended by the time this runs.
+            if (trader.isValid() && trader.equals(villager.getTrader())) {
+                trader.openMerchant(villager, true);
+            }
+        }), null);
     }
 
     /**
