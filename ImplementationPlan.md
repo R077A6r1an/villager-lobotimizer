@@ -440,10 +440,24 @@ warning.
 
 | # | Question | Decision |
 |---|---|---|
-| B1 | Fix approach | **Redesign the `passId` formula to be size-independent, keep the method name and its public contract** ("monotonically non-decreasing per world; a later call for a larger `fullTime` never returns a smaller value; comparable via plain `>`"). Rejected alternative: store `size()` (or a schedule hash/version) alongside `lastRestockPassId` and treat any mismatch as invalidated — this works but requires a second PDC key and an explicit invalidation branch at every read site; encoding the schedule point's own absolute tick instead makes the value inherently comparable with no extra key or branch, since absolute ticks never depend on how many *other* points are configured. |
+| B1 | Fix approach | **Redesign the `passId` formula to be size-independent, keep the method name and comparability via plain `>`.** (See "Corrected contract" note below the table for the precise guarantee this relies on — it is narrower than plain monotonicity.) Rejected alternative: store `size()` (or a schedule hash/version) alongside `lastRestockPassId` and treat any mismatch as invalidated — this works but requires a second PDC key and an explicit invalidation branch at every read site; encoding the schedule point's own absolute tick instead makes the value inherently comparable with no extra key or branch, since absolute ticks never depend on how many *other* points are configured. |
 | B2 | New encoding | `passId(fullTime)` returns `dayStart + tick + 1` for the **latest** configured tick-of-day crossed so far today (`0` if none has been crossed yet today or the schedule is empty), where `dayStart = day * TICKS_PER_DAY`. The `+1` keeps every real crossing's value `>= 1`, so it's unambiguously distinguishable from the PDC default-read sentinel `0L` ("never restocked under schedule mode") — this preserves the existing `pdc.getOrDefault(this.lastRestockPassIdKey, PersistentDataType.LONG, 0L)` call at `LobotomizeStorage.java:724` unchanged. |
 | B3 | Multiple points crossed in one jump | Unchanged behavior, verified by existing test `villagerCatchesUpAfterSleepingPastMultipleScheduledPoints`: `passId` under the new encoding still only reflects the single *latest* point crossed (not a per-point count), so one restock action still clears all due trades at once rather than firing once per skipped point. |
 | B4 | Upgrade/compatibility path | **No explicit migration.** A villager with an old-encoding `lastRestockPassId` (a small `day * oldSize + crossed` integer) will almost always compare as smaller than a freshly computed new-encoding value (an absolute tick, typically in the tens of thousands or more), so upgrading this fix produces **at most one bonus catch-up restock per villager** the next time each is checked, then behaves correctly forever after. This is the same class of benign one-time effect as a version bump and needs no dedicated handling — call it out in the CHANGELOG/release notes rather than writing migration code for it. |
+
+**Corrected contract (issue #4):** an earlier draft of this section described the new encoding as
+"a later call for a larger `fullTime` never returns a smaller value" — i.e. globally monotonic.
+That's not actually true, and was never true even for this new encoding: `passId` intentionally
+dips back to `0` at the start of each new in-game day until that day's own first configured point
+is crossed (exercised directly by
+`RestockScheduleTest.passIdAtDayRolloverDoesNotExceedPreviousDaysLastCrossedValueBeforeItsOwnFirstPoint`).
+The property that actually holds, and that `LobotomizeStorage.refreshTrades`'s
+`currentPassId > lastRestockPassId` comparison actually depends on, is narrower: **a value stored
+from an actual prior restock is always eventually exceeded by a later real crossing.** Nothing in
+the code depends on, or needs, global monotonicity across arbitrary `fullTime` values — only this
+narrower guarantee, which the day-rollover dip does not violate (a stored value is never read back
+*as* a smaller value than itself; it's only ever compared against a later crossing, which by
+definition happens after any same-day dip has already passed).
 
 #### Code changes
 
