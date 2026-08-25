@@ -739,6 +739,41 @@ working" confusion in the first place):
 
 ---
 
+### 11.6 Milestone F — Close the sequential multi-restock E2E coverage gap — **Implemented**
+
+**GitHub issue:** #5 ("No end-to-end test drives sequential multi-restock-per-day scenarios in
+schedule mode").
+
+**Gap (not a defect):** `RestockScheduleEndToEndTest` already covered a 1-point schedule, a
+2-point schedule collapsed into one catch-up restock via a single large forward jump
+(`villagerCatchesUpAfterSleepingPastMultipleScheduledPoints`), and a 3-point schedule reached only
+after all three points already fired together or via a shrink-then-reload scenario
+(`restockKeepsWorkingAfterTimesListShrinksAcrossReload`). Nothing drove three *separate*,
+individually-triggered checks across one in-game day for one villager — restock at 08:00, use a
+trade again, restock at 10:30, use it again, restock at 13:00 — each via its own distinct tick
+rather than one combined jump. As the issue itself notes, the underlying gating logic
+(`RestockSchedule.passId` / `LobotomizeStorage.refreshTrades`) is identical regardless of how the
+schedule is reached, so this was purely about closing an end-to-end confidence gap, not chasing a
+suspected bug.
+
+#### Code changes
+
+**`src/test/java/dev/mja00/villagerLobotomizer/RestockScheduleEndToEndTest.java`**
+- New test `villagerRestocksAtEachOfThreeScheduledPointsIndividually`: loads `mode: schedule` with
+  `times = ["08:00", "10:30", "13:00"]`, ticks the villager once before any point (lobotomizes it,
+  0 restocks), then advances `world.setFullTime(...)` to each of tick 2000/4500/7000 in turn with a
+  separate `tick(...)` call and a trade re-marked as used between each, asserting `tradesWereReset`
+  and `restocksToday` incrementing to 1, 2, then 3 — proving each configured point restocks
+  individually rather than only being reachable via a combined catch-up jump.
+- No production code changed; this is additive test coverage only, exactly as the issue's own
+  "Blocking for a first beta release?" answer describes.
+
+#### Tests
+- The new test itself is the deliverable. Full suite green (`./gradlew test`, 91 tests including
+  this one).
+
+---
+
 ### Updated rollout order (supersedes/extends §10 for this follow-up work)
 
 1. **Milestone A — done, manually verified.** `EntityListener` transform handler +
@@ -770,3 +805,8 @@ working" confusion in the first place):
    would not have actually delivered the updated comment to already-migrated servers (see §11.5's
    root-cause section), so no config schema change was made. No manual `/runServer` pass needed;
    this is a plain constructor-logic change already fully covered by MockBukkit.
+6. **Milestone F — done.** Closes the issue #5 test-coverage gap: a new
+   `villagerRestocksAtEachOfThreeScheduledPointsIndividually` case in
+   `RestockScheduleEndToEndTest` drives three separate, individually-triggered restocks across one
+   in-game day, rather than one combined catch-up jump. Purely additive test coverage, no
+   production code changed, no manual verification needed.

@@ -264,4 +264,43 @@ class RestockScheduleEndToEndTest extends MockBukkitTestBase {
                 "shrinking restock-schedule.times across a reload must not stall restocking");
         assertEquals(1, villager.getRestocksToday(), "day rollover resets the counter before the new restock");
     }
+
+    @Test
+    void villagerRestocksAtEachOfThreeScheduledPointsIndividually() {
+        // Regression/coverage test for issue #5: unlike villagerCatchesUpAfterSleepingPastMultipleScheduledPoints
+        // (one combined jump past several points at once), this drives three separate, individually
+        // triggered checks across one in-game day, marking a trade used again between each, so each
+        // configured point fires its own distinct restock rather than being collapsed into one.
+        loadPluginWithSchedule(List.of("08:00", "10:30", "13:00")); // ticks 2000, 4500, 7000
+        world.setFullTime(500L); // 06:30 - before any configured point
+
+        Villager villager = spawnDueVillager(new Location(world, 0, 64, 0));
+        plugin.getStorage().addVillager(villager);
+        tick(villager, CHECK_INTERVAL_TICKS + 1);
+        assertEquals(0, villager.getRestocksToday(), "precondition: nothing fired before the first point");
+
+        // 08:00
+        world.setFullTime(2000L);
+        tick(villager, CHECK_INTERVAL_TICKS);
+        assertTrue(tradesWereReset(villager), "08:00 should restock individually");
+        assertEquals(1, villager.getRestocksToday());
+
+        // Use a trade up again, then advance to 10:30.
+        MerchantRecipe usedAgain1 = new MerchantRecipe(new ItemStack(Material.EMERALD), 16);
+        usedAgain1.setUses(2);
+        villager.setRecipes(List.of(usedAgain1));
+        world.setFullTime(4500L);
+        tick(villager, CHECK_INTERVAL_TICKS);
+        assertTrue(tradesWereReset(villager), "10:30 should restock individually, not just 08:00");
+        assertEquals(2, villager.getRestocksToday());
+
+        // Use a trade up again, then advance to 13:00.
+        MerchantRecipe usedAgain2 = new MerchantRecipe(new ItemStack(Material.EMERALD), 16);
+        usedAgain2.setUses(2);
+        villager.setRecipes(List.of(usedAgain2));
+        world.setFullTime(7000L);
+        tick(villager, CHECK_INTERVAL_TICKS);
+        assertTrue(tradesWereReset(villager), "13:00 should restock individually, completing all three points");
+        assertEquals(3, villager.getRestocksToday(), "all three configured times fired, each via its own check");
+    }
 }
