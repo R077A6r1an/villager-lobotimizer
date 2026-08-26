@@ -152,6 +152,11 @@ version that includes the restock-schedule stability fix from `reports/QA_report
 and (in `schedule` mode) the raw `lastRestockPassId` PDC value for a targeted villager — useful for
 diagnosing why a specific villager isn't restocking.
 
+**Restocking is daytime-only in the overworld; leveling is not.** A lobotomized villager whose
+accumulated trading experience crosses a level threshold levels up as soon as that's checked,
+regardless of time of day — it does not wait for the next in-game dawn the way a restock does. Both
+still require a nearby job site.
+
 ## Troubleshooting
 
 **A villager stopped restocking/leveling after being infected and cured (zombify/cure).** Curing a

@@ -303,4 +303,24 @@ class RestockScheduleEndToEndTest extends MockBukkitTestBase {
         assertTrue(tradesWereReset(villager), "13:00 should restock individually, completing all three points");
         assertEquals(3, villager.getRestocksToday(), "all three configured times fired, each via its own check");
     }
+
+    @Test
+    void villagerLevelsUpAtNightWhileRestockingStillWaitsForDay() {
+        // Regression test for issue #7: refreshTrades used to gate leveling behind the same
+        // daytime check as restocking, so a villager that crossed its XP threshold at night would
+        // not level up until the next dawn. Leveling must now be independent of time of day, while
+        // restocking (which still mirrors vanilla's daytime-only cadence) keeps waiting.
+        loadPluginWithSchedule(List.of("08:00")); // tick 2000
+        world.setFullTime(15000L); // well past 08:00, but night (WorldMock#isDayTime() == false)
+
+        Villager villager = spawnDueVillager(new Location(world, 0, 64, 0));
+        villager.setVillagerExperience(10); // crosses the level 1 -> 2 threshold
+        plugin.getStorage().addVillager(villager);
+
+        tick(villager, CHECK_INTERVAL_TICKS + 1);
+
+        assertEquals(2, villager.getVillagerLevel(), "leveling must not wait for daytime");
+        assertFalse(tradesWereReset(villager), "restocking must still wait for daytime, even though leveling doesn't");
+        assertEquals(0, villager.getRestocksToday(), "no restock should have happened at night");
+    }
 }

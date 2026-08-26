@@ -813,14 +813,7 @@ public class LobotomizeStorage {
             return;
         }
 
-        // Both restocking and leveling require it to be day (in the overworld) with a job site nearby.
-        if (villager.getWorld().getEnvironment() == World.Environment.NORMAL && !villager.getWorld().isDayTime()) {
-            if (this.plugin.isDebugging()) {
-                this.logger.info("[Debug] Skipping trade refresh for " + villager.getUniqueId() + " - it's night time in overworld");
-            }
-            return;
-        }
-
+        // Both restocking and leveling require a nearby job site.
         if (!VillagerUtils.isJobSiteNearby(villager)) {
             warnJobSiteMissingOnce(villager);
             if (this.plugin.isDebugging()) {
@@ -829,6 +822,17 @@ public class LobotomizeStorage {
             return;
         }
         this.jobSiteMissingWarned.remove(villager.getUniqueId());
+
+        // Restocking (only) requires it to be day in the overworld, mirroring vanilla's own
+        // daytime-only restock cadence. Leveling deliberately does NOT wait for day (issue #7):
+        // a villager whose XP already crossed a level threshold should reflect that immediately,
+        // not stall until dawn - the previous shared gate here made both wait for daytime, which
+        // was the confirmed cause of "level-up sometimes takes minutes"/"only levels up at day".
+        boolean canRestockNow = villager.getWorld().getEnvironment() != World.Environment.NORMAL
+                || villager.getWorld().isDayTime();
+        if (!canRestockNow && this.plugin.isDebugging()) {
+            this.logger.info("[Debug] Restock gated for " + villager.getUniqueId() + " - it's night time in overworld (leveling is unaffected)");
+        }
 
         if (this.plugin.isDebugging()) {
             if (scheduleMode) {
@@ -840,7 +844,7 @@ public class LobotomizeStorage {
             }
         }
 
-        if (restockOpportunityAvailable && shouldRestock(villager)) {
+        if (restockOpportunityAvailable && canRestockNow && shouldRestock(villager)) {
             if (scheduleMode) {
                 pdc.set(this.lastRestockPassIdKey, PersistentDataType.LONG, currentPassId);
             } else {
@@ -873,18 +877,20 @@ public class LobotomizeStorage {
         } else if (this.plugin.isDebugging()) {
             if (scheduleMode) {
                 this.logger.info("[Debug] Trade refresh NOT performed for " + villager.getUniqueId() +
-                        ": restockOpportunityAvailable=" + restockOpportunityAvailable +
+                        ": restockOpportunityAvailable=" + restockOpportunityAvailable + ", canRestockNow=" + canRestockNow +
                         " (currentPassId=" + currentPassId + ", lastRestockPassId=" + lastRestockPassId + ")" +
-                        (restockOpportunityAvailable ? ", shouldRestock=false" : ""));
+                        (restockOpportunityAvailable && canRestockNow ? ", shouldRestock=false" : ""));
             } else {
                 this.logger.info("[Debug] Trade refresh NOT performed for " + villager.getUniqueId() +
-                        ": intervalPassed=" + restockOpportunityAvailable + " (needed " + effectiveInterval + "ms, had " + timeSinceLastRestock + "ms)" +
-                        (restockOpportunityAvailable ? ", shouldRestock=false" : ""));
+                        ": intervalPassed=" + restockOpportunityAvailable + ", canRestockNow=" + canRestockNow +
+                        " (needed " + effectiveInterval + "ms, had " + timeSinceLastRestock + "ms)" +
+                        (restockOpportunityAvailable && canRestockNow ? ", shouldRestock=false" : ""));
             }
         }
 
-        // Level the villager up to match its accumulated experience. Gated on day + job site above
-        // (mirrors restock); max villager level is 5, which getVillagerLevel already caps.
+        // Level the villager up to match its accumulated experience, independent of time of day
+        // (issue #7) - only gated on job site nearby, checked above. Max villager level is 5,
+        // which getVillagerLevel already caps.
         try {
             if (needsLevelUp) {
                 int increaseAmount = Math.max(0, expectedLevel - currentLevel);

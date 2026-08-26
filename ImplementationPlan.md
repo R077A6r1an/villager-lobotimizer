@@ -880,3 +880,124 @@ instance to a fresh view, so the deprecated overload is what's actually usable h
    simulation), so a manual `/runServer` pass (open a trade window, trigger a restock, confirm it
    updates live with no distracting visual side effect) is required before closing issue #6, not
    just recommended.
+8. **Milestone H — done.** Fixes issue #7: `refreshTrades` no longer gates leveling behind the
+   day/night check, only restocking does. Confirmed root cause (§11.8), owner-confirmed via
+   reproduction that this reproduces with or without a zombify/cure round trip, and H1 resolved as
+   "decouple leveling from daytime, job site stays required for both." `RestockScheduleEndToEndTest`
+   covers the fix end-to-end (94 tests, full suite green).
+
+---
+
+### 11.8 Milestone H — Decouple villager leveling from the day/night restock gate (issue #7) — **Implemented**
+
+**GitHub issue:** #7 ("Villagers sometimes take minutes to level up after zombify/cure — needs
+reproduction").
+
+**Status:** Reproduced in production by the testing department, confirming both of this section's
+earlier findings from code review: (1) the delayed level-up reproduces with or without a zombify/
+cure round trip — a villager traded with at night, crossing its XP threshold, only leveled up "at
+the next day upon first scheduled restock"; (2) it is specifically the day/night gate, not the
+transform path, since testing separately confirmed the same stall on villagers that were never
+cured. This confirms the code-level analysis below rather than superseding it.
+
+**Code-level findings (confirmed by the above reproduction):**
+
+- **The day/night gate is the dominant explanation, and it is not specific to zombify/cure.**
+  `refreshTrades` (`LobotomizeStorage.java:817`) gates *both* restocking and leveling behind one
+  check:
+  ```java
+  if (villager.getWorld().getEnvironment() == World.Environment.NORMAL && !villager.getWorld().isDayTime()) {
+      return; // neither restock nor increaseLevel runs below this point
+  }
+  ```
+  `villager.increaseLevel(...)` (`LobotomizeStorage.java:891`) sits below this gate unconditionally.
+  This is pre-existing, unrelated to the schedule-restock feature or to `EntityTransformEvent`
+  handling — it applies identically whether or not a villager was ever infected/cured. A villager
+  that crosses its XP threshold at dusk or during the night simply doesn't level up until
+  `isDayTime()` next returns `true`, which at default game speed is on the order of several real
+  minutes (vanilla night is roughly 10000-11000 of the 24000 ticks/day, i.e. ~8-9 real minutes) —
+  matching the "a few minutes" reports well. Confirmed both by direct code read and by the
+  production reproduction above.
+- **The transient re-lobotomization explanation (issue #7's "explanation 2") is now quantitatively
+  ruled out as the primary cause.** `addVillager` (`LobotomizeStorage.java:304-336`) immediately
+  re-lobotomizes an already-`isLobotomized`-marked villager on chunk load (the common case with the
+  default `persist-lobotomized-state: true`, since Milestone A bridges that marker across the
+  cure) and schedules its next check at `inactiveCheckInterval`. `scheduleVillagerTask`
+  (`LobotomizeStorage.java:1231-1271`) uses that same value as both the Paper `runAtFixedRate`
+  initial delay and period, and the shipped default `inactive-check-interval` is `150` ticks
+  (7.5s, per `config.yml`) — so this path is bounded at ~7.5s, nowhere near "a few minutes." (This
+  bound only holds for `persist-lobotomized-state: true`; with it `false` a cured villager comes
+  back fully active and levels via vanilla AI on an entirely different, not-yet-investigated code
+  path — see Open Question 3 below.)
+- **The "logging out and back in" fix has no matching code mechanism**, and is most likely
+  coincidental rather than causal. Neither `removeVillager`/`addVillager` (a chunk unload/reload)
+  nor a player relogging changes `world.getFullTime()`/`isDayTime()`, and Milestone A's manual
+  verification already confirmed the PDC bridge survives the zombify/cure round trip correctly (no
+  state loss that a relog would be "fixing"). Given the day/night gate above, the simplest
+  explanation is that whatever real time elapsed during the reported logout/relogin was enough for
+  the in-game night to pass on its own — the same fix a player would get by just waiting, misattributed
+  to the relog itself.
+- **No separate "night-time trade refresh" toggle exists in the codebase today.** The original
+  feature request (`Features/Feature_scheduled_restock.md:67`) speculated leveling/restock-at-night
+  might already be a separate configurable feature to reconsider; a repo-wide search for
+  `isDayTime`/night-related config confirms the gate above is the only place day/night is checked —
+  there is nothing else to reconsider or deprecate.
+
+#### Resolved design decisions
+
+| # | Question | Decision |
+|---|----------|----------|
+| H1 | Decouple leveling from the day/night gate? | **Yes.** Villager leveling runs as soon as accumulated XP crosses a threshold, independent of time of day. Restocking keeps the existing day-only gate (unchanged, still mirrors vanilla's daytime-only restock cadence) — only leveling moves. |
+| H2 | Apply to both `interval` and `schedule` restock modes? | **Yes, uniformly, with no mode-specific carve-out.** `refreshTrades` already shares one method for both modes; the day/night gate that used to block leveling was mode-agnostic to begin with (it read `villager.getWorld().isDayTime()` directly, not anything schedule-specific), so removing it from the leveling path is naturally mode-agnostic too. The owner's stated hard requirement was that this work "at least for schedule mode, since interval mode is deprecated" — since the fix is a single shared code path, `interval` mode gets the same fix for free rather than needing a second one. |
+| H3 | Investigate the `persist-lobotomized-state: false` path? | **Deferred, out of scope for this milestone.** The production server this was reproduced on runs `persist-lobotomized-state: true` (confirmed by the owner), so this milestone's fix is validated against the config that's actually in use. Worth investigating if that setting is ever changed in the future, but not blocking here. |
+| H4 | Still need the original zombify/cure reproduction protocol? | **No longer necessary as a gate on the fix** — testing already reproduced the day/night mechanism directly in production, including confirming it reproduces with non-cured villagers too, which is strictly more informative than the original protocol (it also rules out any zombify/cure-specific contribution). |
+
+**Separately reported, not yet triaged as related:** a report of cured villagers' discounted prices
+"sometimes return to normal but shortly after they get the discount again." No shared code path has
+been identified between that and this issue's day/night leveling gate — `villager.updateDemand()`
+(price/demand recalculation) is only called from the restock branch, not the leveling branch this
+milestone touches, and Hero-of-the-Village discounts are vanilla `PotionEffect`-driven, outside this
+plugin's code entirely. Recommend opening a separate issue to track and reproduce it independently
+rather than folding it into this fix.
+
+#### Code changes
+
+**`src/main/java/dev/mja00/villagerLobotomizer/LobotomizeStorage.java`**
+- `refreshTrades`: reordered the existing gates so the job-site-nearby check (required for both
+  restocking and leveling) runs first, then a new `canRestockNow` boolean captures the day/night
+  check — computed the same way as before (`environment != NORMAL || isDayTime()`), but now only
+  applied to the restock condition (`restockOpportunityAvailable && canRestockNow && shouldRestock(villager)`)
+  rather than as an early `return` that skipped the leveling block entirely. The leveling block
+  below is unchanged except for its gating comment; `villager.increaseLevel(...)` now runs whenever
+  `needsLevelUp` is true and a job site is nearby, regardless of `canRestockNow`.
+- Debug log lines updated to include `canRestockNow` in the "trade refresh NOT performed" messages
+  (both `schedule` and `interval` mode variants), and the old "skipping trade refresh - it's night
+  time" log (which used to explain skipping *both* restock and leveling) was replaced with a
+  restock-specific "Restock gated ... (leveling is unaffected)" line so debug output doesn't imply
+  leveling is also blocked.
+- No PDC schema change, no new config key, no `config-version` bump — this is a pure behavior
+  change to existing, already-configured gating logic.
+
+**`CLAUDE.md` / `README.md`**
+- `CLAUDE.md`'s `LobotomizeStorage.java` bullet updated: "daytime-only" no longer describes trade
+  refresh as a whole, only restocking; a short clause explains why leveling was split out (issue #7).
+- `README.md`'s "Restock Scheduling" section gets a new short paragraph stating restocking is
+  daytime-only but leveling is not (both still require a job site).
+
+#### Tests
+
+- **`RestockScheduleEndToEndTest.java` (extend), new —
+  `villagerLevelsUpAtNightWhileRestockingStillWaitsForDay`**: loads `mode: schedule`, sets world
+  time to a night tick well past the one configured restock point, gives a lobotomized villager
+  enough `villagerExperience` to cross the level 1→2 threshold, ticks it through its normal
+  per-entity check, and asserts the villager's level increased to 2 while `restocksToday` stayed at
+  `0` and its trades were not reset — proving leveling now happens at night while restocking still
+  correctly waits for day, in the same single check. Before this fix, the assertion on villager
+  level would have failed (stayed at 1) because the old shared gate returned early before ever
+  reaching the leveling block.
+- Full suite green (`./gradlew test`, 94 tests including this one); no other test needed updating,
+  since no existing test asserted the old "leveling also waits for day" behavior.
+- **Manual `/runServer` verification:** not required to close this issue — the mechanism was
+  already reproduced directly in production (see Status above), and the fix is a straightforward,
+  fully MockBukkit-testable gating change (unlike Milestones A/G, which depended on real
+  client/entity behavior MockBukkit can't simulate).
